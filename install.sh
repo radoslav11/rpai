@@ -1,16 +1,14 @@
 #!/usr/bin/env bash
-# Build script for rpai (for local testing)
+# Installation script for rpai
 
 set -e
 
-echo "Building rpai for local testing..."
-cargo build --release
+echo "Installing rpai..."
+cargo install --path .
 
 echo ""
-echo "✅ Build complete! Binary is at: target/release/rpai"
-echo ""
-echo "For production installation, use: cargo install --path ."
-echo "This will install to ~/.cargo/bin/ automatically."
+echo "✅ Installation complete!"
+echo "Binary installed to: ~/.cargo/bin/rpai"
 echo ""
 echo "To enable tmux integration, add this line to your ~/.tmux.conf:"
 echo ""
