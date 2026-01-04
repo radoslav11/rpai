@@ -20,7 +20,7 @@ A TUI for managing multiple AI coding agent sessions (opencode, claude, codex, c
 cargo install rpai
 ```
 
-### Option 2: Install from source
+### Option 2: Install from source (Latest dev version)
 
 ```bash
 git clone https://github.com/radoslav11/rpai.git
@@ -38,7 +38,7 @@ cd rpai
 ./install.sh
 ```
 
-This builds the binary to `target/release/rpai`.
+This builds the binary to `target/release/rpai` for local testing.
 
 ## Tmux Setup
 
