@@ -1,10 +1,14 @@
 # rpai
 
 <div align="center">
-  <img src="assets/redpanda.png" width="120" alt="rpai logo">
+  <img src="assets/redpanda.png" width="150" alt="rpai logo">
 </div>
 
 A tool for managing multiple AI coding agent sessions (opencode, claude, codex, cursor) in tmux.
+
+<div align="center">
+  <img src="assets/screenshot.png" alt="rpai screenshot">
+</div>
 
 ## Features
 

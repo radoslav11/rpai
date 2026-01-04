@@ -1,8 +1,8 @@
 [package]
 name = "rpai"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
-description = "A TUI for managing AI coding agent sessions in tmux"
+description = "Tool to make it easier to jump between AI agents in tmux."
 license = "MIT"
 repository = "https://github.com/radoslav11/rpai"
 readme = "README.md"
