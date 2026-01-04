@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::os::unix::ffi::OsStrExt;
 use std::process::Command;
-use sysinfo::{Pid, ProcessRefreshKind, System};
+use sysinfo::{ProcessRefreshKind, System};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct AiSession {
@@ -28,51 +28,67 @@ enum SessionStatus {
     Stale,
 }
 
-impl AiSession {
-    fn from_process(pid: Pid, agent_type: &str, system: &System) -> Result<Self> {
-        let process = system.process(pid).context("Process not found")?;
-
-        let working_dir = process
-            .cwd()
-            .map(|p| p.display().to_string())
-            .unwrap_or_else(|| "unknown".to_string());
-
-        let uptime = Duration::seconds(process.run_time() as i64);
-        let memory_mb = process.memory() / 1024 / 1024;
-        let cpu_usage = process.cpu_usage();
-
-        let status = Self::determine_status(uptime, cpu_usage);
-
-        Ok(AiSession {
-            pid: pid.as_u32(),
-            agent_type: agent_type.to_string(),
-            working_dir,
-            name: None,
-            pane_id: None,
-            status,
-            uptime_seconds: uptime.num_seconds(),
-            cpu_usage,
-            memory_mb,
-            last_activity: None,
-        })
-    }
-
-    fn determine_status(uptime: Duration, cpu_usage: f32) -> SessionStatus {
-        if cpu_usage > 1.0 || uptime.num_minutes() < 1 {
-            SessionStatus::Active
-        } else if uptime.num_minutes() < 30 {
-            SessionStatus::Idle
-        } else {
-            SessionStatus::Stale
-        }
-    }
+#[derive(Debug, Clone)]
+struct ProcessInfo {
+    pid: u32,
+    comm: String,
+    cmd: Option<String>,
+    cwd: Option<String>,
+    parent_pid: Option<u32>,
 }
 
-fn os_str_to_str(s: &std::ffi::OsStr) -> String {
-    match s.to_str() {
-        Some(s) => s.to_string(),
-        None => String::from_utf8_lossy(s.as_bytes()).to_string(),
+fn get_process_info_via_ps() -> Result<Vec<ProcessInfo>> {
+    let output = Command::new("ps")
+        .args(["-axo", "pid,comm,command,pid,ppid"])
+        .output()
+        .context("Failed to execute ps command")?;
+
+    let mut processes = Vec::new();
+
+    if output.status.success() {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        for line in stdout.lines().skip(1) {
+            // Skip header
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() >= 4 {
+                let pid: u32 = parts.get(0).and_then(|s| s.parse().ok()).unwrap_or(0);
+                let comm = parts.get(1).unwrap_or(&"").to_string();
+                let cmd = parts.get(2).map(|s| s.to_string());
+                let ppid: Option<u32> = parts.get(3).and_then(|s| s.parse().ok());
+
+                processes.push(ProcessInfo {
+                    pid,
+                    comm,
+                    cmd,
+                    cwd: None,
+                    parent_pid: ppid,
+                });
+            }
+        }
     }
+
+    Ok(processes)
+}
+
+fn get_cwd_via_lsof(pid: u32) -> Option<String> {
+    let output = Command::new("lsof")
+        .args(["-p", &pid.to_string(), "-a"])
+        .output()
+        .ok()?;
+
+    if output.status.success() {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        for line in stdout.lines() {
+            if line.contains(" cwd ") {
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if let Some(path) = parts.last() {
+                    return Some(path.to_string());
+                }
+            }
+        }
+    }
+
+    None
 }
 
 fn scan_ai_processes() -> Result<Vec<AiSession>> {
@@ -83,51 +99,133 @@ fn scan_ai_processes() -> Result<Vec<AiSession>> {
         ProcessRefreshKind::everything(),
     );
 
-    let agent_pattern = Regex::new(r"(?i)(opencode|claude|codex|aider|cursor)")?;
+    let ps_processes = get_process_info_via_ps()?;
+    let ps_map: HashMap<u32, ProcessInfo> = ps_processes.into_iter().map(|p| (p.pid, p)).collect();
+
+    let agent_pattern = Regex::new(r"(?i)(opencode|claude|codex|cursor)")?;
     let mut sessions = Vec::new();
 
     for (pid, process) in system.processes() {
-        let cmd = os_str_to_str(process.name());
-        if agent_pattern.is_match(&cmd) {
-            let agent_type = agent_pattern
-                .find(&cmd)
-                .map(|m| m.as_str().to_string())
-                .unwrap_or_else(|| "unknown".to_string());
+        let process_info = ps_map.get(&pid.as_u32());
 
-            if let Ok(session) = AiSession::from_process(*pid, &agent_type, &system) {
-                sessions.push(session);
+        let (agent_type, is_match) = if let Some(info) = process_info {
+            let comm_lower = info.comm.to_lowercase();
+            let cmd_lower = info
+                .cmd
+                .as_ref()
+                .map(|c| c.to_lowercase())
+                .unwrap_or_default();
+
+            // Filter out system services that happen to match agent names
+            if comm_lower.contains("cursoruiviewservice")
+                || cmd_lower.contains("cursoruiviewservice")
+            {
+                continue;
             }
+
+            let match_comm = agent_pattern.is_match(&comm_lower);
+            let match_cmd = agent_pattern.is_match(&cmd_lower);
+
+            let matched = match_comm || match_cmd;
+            let agent_type = if match_cmd {
+                if cmd_lower.contains("opencode") {
+                    "opencode"
+                } else if cmd_lower.contains("claude") {
+                    "claude"
+                } else if cmd_lower.contains("codex") {
+                    "codex"
+                } else if cmd_lower.contains("cursor") {
+                    "cursor"
+                } else if comm_lower.contains("opencode") {
+                    "opencode"
+                } else if comm_lower.contains("claude") {
+                    "claude"
+                } else if comm_lower.contains("codex") {
+                    "codex"
+                } else if comm_lower.contains("cursor") {
+                    "cursor"
+                } else {
+                    "unknown"
+                }
+            } else {
+                if comm_lower.contains("opencode") {
+                    "opencode"
+                } else if comm_lower.contains("claude") {
+                    "claude"
+                } else if comm_lower.contains("codex") {
+                    "codex"
+                } else if comm_lower.contains("cursor") {
+                    "cursor"
+                } else {
+                    "unknown"
+                }
+            };
+
+            (agent_type.to_string(), matched)
+        } else {
+            let cmd = process.name();
+            let cmd_str = match cmd.to_str() {
+                Some(s) => s.to_string(),
+                None => String::from_utf8_lossy(cmd.as_bytes()).to_string(),
+            };
+            let matched = agent_pattern.is_match(&cmd_str.to_lowercase());
+
+            let agent_type = if matched {
+                agent_pattern
+                    .find(&cmd_str.to_lowercase())
+                    .map(|m| m.as_str().to_string())
+                    .unwrap_or_else(|| "unknown".to_string())
+            } else {
+                continue;
+            };
+
+            (agent_type, matched)
+        };
+
+        if !is_match {
+            continue;
         }
+
+        let working_dir = process
+            .cwd()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| {
+                get_cwd_via_lsof(pid.as_u32()).unwrap_or_else(|| "unknown".to_string())
+            });
+
+        let uptime = Duration::seconds(process.run_time() as i64);
+        let memory_mb = process.memory() / 1024 / 1024;
+        let cpu_usage = process.cpu_usage();
+
+        let status = AiSession::determine_status(uptime, cpu_usage);
+
+        sessions.push(AiSession {
+            pid: pid.as_u32(),
+            agent_type,
+            working_dir,
+            name: None,
+            pane_id: None,
+            status,
+            uptime_seconds: uptime.num_seconds(),
+            cpu_usage,
+            memory_mb,
+            last_activity: None,
+        });
     }
 
     Ok(sessions)
 }
 
-fn get_tmux_session_info() -> Result<HashMap<String, String>> {
-    let output = Command::new("tmux")
-        .args([
-            "list-panes",
-            "-a",
-            "-F",
-            "#{pane_pid}\t#{pane_id}\t#{pane_current_path}",
-        ])
-        .output()
-        .context("Failed to execute tmux command")?;
-
-    let mut pane_info = HashMap::new();
-
-    if output.status.success() {
-        for line in String::from_utf8_lossy(&output.stdout).lines() {
-            let parts: Vec<&str> = line.split('\t').collect();
-            if parts.len() >= 3 {
-                let pid = parts[0].to_string();
-                let pane_id = parts[1].to_string();
-                pane_info.insert(pid, pane_id);
-            }
+impl AiSession {
+    fn determine_status(uptime: Duration, cpu_usage: f32) -> SessionStatus {
+        if cpu_usage > 1.0 || uptime.num_minutes() < 1 {
+            SessionStatus::Active
+        } else if uptime.num_minutes() < 30 {
+            SessionStatus::Idle
+        } else {
+            SessionStatus::Stale
         }
     }
-
-    Ok(pane_info)
 }
 
 fn display_sessions(sessions: &[AiSession]) {
@@ -210,8 +308,7 @@ fn main() -> Result<()> {
             println!();
             println!("Usage:");
             println!("  rpai scan          - Scan and display AI agent sessions");
-            println!("  rpai rename <id>   - Rename a session");
-            println!("  rpai kill <id>      - Terminate a session");
+            println!("  rpai kill <id>     - Terminate a session");
             println!("  rpai help           - Show this help message");
         }
         _ => {
