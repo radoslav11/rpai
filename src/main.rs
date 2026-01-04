@@ -33,13 +33,11 @@ struct ProcessInfo {
     pid: u32,
     comm: String,
     cmd: Option<String>,
-    cwd: Option<String>,
-    parent_pid: Option<u32>,
 }
 
 fn get_process_info_via_ps() -> Result<Vec<ProcessInfo>> {
     let output = Command::new("ps")
-        .args(["-axo", "pid,comm,command,pid,ppid"])
+        .args(["-axo", "pid,comm,command"])
         .output()
         .context("Failed to execute ps command")?;
 
@@ -50,19 +48,12 @@ fn get_process_info_via_ps() -> Result<Vec<ProcessInfo>> {
         for line in stdout.lines().skip(1) {
             // Skip header
             let parts: Vec<&str> = line.split_whitespace().collect();
-            if parts.len() >= 4 {
+            if parts.len() >= 2 {
                 let pid: u32 = parts.get(0).and_then(|s| s.parse().ok()).unwrap_or(0);
                 let comm = parts.get(1).unwrap_or(&"").to_string();
                 let cmd = parts.get(2).map(|s| s.to_string());
-                let ppid: Option<u32> = parts.get(3).and_then(|s| s.parse().ok());
 
-                processes.push(ProcessInfo {
-                    pid,
-                    comm,
-                    cmd,
-                    cwd: None,
-                    parent_pid: ppid,
-                });
+                processes.push(ProcessInfo { pid, comm, cmd });
             }
         }
     }
@@ -295,6 +286,38 @@ fn format_duration(seconds: i64) -> String {
     }
 }
 
+fn kill_session(id: usize) -> Result<()> {
+    let sessions = scan_ai_processes()?;
+
+    if id == 0 || id > sessions.len() {
+        println!("Invalid session ID: {}", id);
+        println!("Use 'rpai scan' to see available sessions");
+        return Ok(());
+    }
+
+    let session = &sessions[id - 1];
+    let pid = session.pid;
+
+    let output = Command::new("kill")
+        .args([pid.to_string().as_str()])
+        .output()
+        .context(format!("Failed to kill process {}", pid))?;
+
+    if output.status.success() {
+        println!("Killed session [{}] (PID: {})", id, pid);
+    } else {
+        println!("Failed to kill session [{}] (PID: {})", id, pid);
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        if !stderr.is_empty() {
+            eprintln!("Error: {}", stderr);
+        }
+    }
+
+    std::thread::sleep(std::time::Duration::from_millis(100));
+
+    Ok(())
+}
+
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
 
@@ -302,6 +325,19 @@ fn main() -> Result<()> {
         Some("scan") => {
             let sessions = scan_ai_processes()?;
             display_sessions(&sessions);
+        }
+        Some("kill") => {
+            if let Some(id_str) = args.get(2) {
+                if let Ok(id) = id_str.parse::<usize>() {
+                    kill_session(id)?;
+                } else {
+                    println!("Invalid ID: {}", id_str);
+                    println!("Use 'rpai kill <id>' where <id> is a number");
+                }
+            } else {
+                println!("Usage: rpai kill <id>");
+                println!("Use 'rpai scan' to see available sessions");
+            }
         }
         Some("help") | Some("-h") | Some("--help") => {
             println!("rpai - Tmux plugin for AI agent session management");
