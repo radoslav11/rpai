@@ -4,7 +4,6 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::os::unix::ffi::OsStrExt;
-use std::path::Path;
 use std::process::Command;
 use sysinfo::{Pid, ProcessRefreshKind, System};
 
@@ -84,7 +83,7 @@ fn scan_ai_processes() -> Result<Vec<AiSession>> {
         ProcessRefreshKind::everything(),
     );
 
-    let agent_pattern = Regex::new(r"(opencode|claude|codex|aider|cursor)")?;
+    let agent_pattern = Regex::new(r"(?i)(opencode|claude|codex|aider|cursor)")?;
     let mut sessions = Vec::new();
 
     for (pid, process) in system.processes() {
@@ -132,41 +131,56 @@ fn get_tmux_session_info() -> Result<HashMap<String, String>> {
 }
 
 fn display_sessions(sessions: &[AiSession]) {
-    println!("╔══════════════════════════════════════════════════════════════════════╗");
-    println!("║                        AI Agent Sessions                            ║");
-    println!("╠══════════════════════════════════════════════════════════════════════╣");
-
     if sessions.is_empty() {
-        println!("║  No AI agent processes detected                                     ║");
-    } else {
-        for (i, session) in sessions.iter().enumerate() {
-            println!(
-                "║ [{:2}] {:15} | {:8} | {:8} | {:8} ║",
-                i + 1,
-                session.agent_type,
-                format_status(&session.status),
-                format_duration(session.uptime_seconds),
-                format!("{:.1}%", session.cpu_usage)
-            );
-            println!(
-                "║     PID: {:8} | Mem: {:6}MB                                ║",
-                session.pid, session.memory_mb
-            );
-            println!("║     {:57} ║", truncate_path(&session.working_dir, 57));
-            if i < sessions.len() - 1 {
-                println!("╠─────────────────────────────────────────────────────────────────────╣");
-            }
-        }
+        println!("No AI agent processes detected");
+        return;
     }
 
-    println!("╚══════════════════════════════════════════════════════════════════════╝");
+    println!("AI Agent Sessions:");
+    println!();
+
+    for (i, session) in sessions.iter().enumerate() {
+        let status_indicator = match session.status {
+            SessionStatus::Active => "●",
+            SessionStatus::Idle => "○",
+            SessionStatus::Stale => "○",
+        };
+
+        println!(
+            "{} [{}] {} | {} | {}",
+            status_indicator,
+            i + 1,
+            session.agent_type,
+            format_status(&session.status),
+            format_duration(session.uptime_seconds)
+        );
+
+        println!(
+            "    PID: {} | Mem: {}MB | CPU: {:.1}%",
+            session.pid, session.memory_mb, session.cpu_usage
+        );
+
+        let cwd = if session.working_dir.len() > 60 {
+            format!(
+                "...{}",
+                &session.working_dir[session.working_dir.len() - 57..]
+            )
+        } else {
+            session.working_dir.clone()
+        };
+        println!("    {}", cwd);
+
+        if i < sessions.len() - 1 {
+            println!();
+        }
+    }
 }
 
 fn format_status(status: &SessionStatus) -> String {
     match status {
-        SessionStatus::Active => "Active  ".to_string(),
-        SessionStatus::Idle => "Idle   ".to_string(),
-        SessionStatus::Stale => "Stale  ".to_string(),
+        SessionStatus::Active => "Active".to_string(),
+        SessionStatus::Idle => "Idle".to_string(),
+        SessionStatus::Stale => "Stale".to_string(),
     }
 }
 
@@ -180,14 +194,6 @@ fn format_duration(seconds: i64) -> String {
         format!("{}m", minutes)
     } else {
         format!("{}s", seconds)
-    }
-}
-
-fn truncate_path(path: &str, max_len: usize) -> String {
-    if path.len() > max_len {
-        format!("...{}", &path[path.len() - max_len + 3..])
-    } else {
-        path.to_string()
     }
 }
 
