@@ -1,5 +1,9 @@
 # rpai
 
+<div align="center">
+  <img src="panda.png" width="100" alt="rpai logo">
+</div>
+
 A TUI for managing multiple AI coding agent sessions (opencode, claude, codex, cursor) in tmux.
 
 ## Features
@@ -39,7 +43,7 @@ cd rpai
 ./install.sh
 ```
 
-This builds the binary to `target/release/rpai` for local testing.
+This builds and installs rpai in one step.
 
 ## Tmux Setup
 
@@ -57,7 +61,7 @@ tmux source ~/.tmux.conf
 
 **Now use it:**
 
-- Press `prefix + a` to open rpai in a centered popup
+- Press `prefix + a` to open rpai in a centered popup.
 
 ## Usage
 

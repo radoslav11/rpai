@@ -1,5 +1,3 @@
-use anyhow::{Context, Result};
-use chrono::Duration;
 use crossterm::{
     event::{
         self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
@@ -19,12 +17,15 @@ use ratatui::{
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::env;
 use std::fs;
 use std::io::{stdout, Stdout};
 use std::path::PathBuf;
 use std::process::Command;
-use std::time::{Duration as StdDuration, Instant};
+use std::time::{Duration, Instant};
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
+
+pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 // ============================================================================
 // THEMES
@@ -173,8 +174,9 @@ impl Theme {
 // ============================================================================
 
 fn config_dir() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
+    env::var("HOME")
+        .map(|h| PathBuf::from(h))
+        .unwrap_or_else(|_| PathBuf::from("."))
         .join(".config")
         .join("rpai")
 }
@@ -253,7 +255,7 @@ fn get_process_info_via_ps() -> Result<Vec<ProcessInfo>> {
     let output = Command::new("ps")
         .args(["-axo", "pid,ppid,comm,command"])
         .output()
-        .context("Failed to execute ps command")?;
+        .map_err(|e| format!("Failed to execute ps command: {}", e))?;
 
     let mut processes = Vec::new();
 
@@ -346,7 +348,7 @@ fn get_tmux_pane_info() -> Result<HashMap<u32, TmuxPaneInfo>> {
             "#{pane_pid}\t#{pane_id}\t#{session_name}\t#{window_index}\t#{pane_width}\t#{pane_height}",
         ])
         .output()
-        .context("Failed to execute tmux command")?;
+        .map_err(|e| format!("Failed to execute tmux command: {}", e))?;
 
     let mut pane_map: HashMap<u32, TmuxPaneInfo> = HashMap::new();
 
@@ -493,7 +495,7 @@ fn scan_ai_processes() -> Result<Vec<AiSession>> {
                 .map(|p| p.display().to_string())
                 .unwrap_or_else(|| get_cwd_via_lsof(pid).unwrap_or_else(|| "unknown".to_string()));
 
-            let uptime = Duration::seconds(process.run_time() as i64);
+            let uptime = Duration::from_secs(process.run_time() as u64);
             let memory_mb = process.memory() / 1024 / 1024;
 
             let tmux_info = find_tmux_pane_for_pid(pid, &ps_map, &tmux_panes);
@@ -521,7 +523,7 @@ fn scan_ai_processes() -> Result<Vec<AiSession>> {
                 window_index,
                 pane_width,
                 pane_height,
-                uptime_seconds: uptime.num_seconds(),
+                uptime_seconds: uptime.as_secs() as i64,
                 memory_mb,
                 state: get_session_state(pid),
             });
@@ -552,7 +554,7 @@ fn format_duration(seconds: i64) -> String {
 // Format path with visual hierarchy
 fn format_path_visual(path: &str, max_len: usize, theme: &Theme) -> Vec<Span<'static>> {
     // Handle home directory
-    let home = dirs::home_dir().map(|p| p.display().to_string());
+    let home = env::var("HOME").ok();
     let display_path = if let Some(ref home_path) = home {
         if path.starts_with(home_path) {
             format!("~{}", &path[home_path.len()..])
@@ -1001,7 +1003,7 @@ fn run_tui(sessions: Vec<AiSession>) -> Result<Option<AiSession>> {
         terminal.draw(|frame| ui(frame, &mut app))?;
 
         // Check for events with 1-second timeout
-        if event::poll(StdDuration::from_millis(1000))? {
+        if event::poll(Duration::from_millis(1000))? {
             match event::read()? {
                 Event::Key(key) => {
                     if key.kind == KeyEventKind::Press {
@@ -1130,12 +1132,12 @@ fn jump_to_session(session: &AiSession) -> Result<()> {
         Command::new("tmux")
             .args(["select-window", "-t", &window_target])
             .output()
-            .context("Failed to execute tmux select-window command")?;
+            .map_err(|e| format!("Failed to execute tmux select-window command: {}", e))?;
 
         let output = Command::new("tmux")
             .args(["select-pane", "-t", &pane_target])
             .output()
-            .context("Failed to execute tmux select-pane command")?;
+            .map_err(|e| format!("Failed to execute tmux select-pane command: {}", e))?;
 
         if output.status.success() {
             println!(
@@ -1210,8 +1212,7 @@ fn kill_session(id: usize) -> Result<()> {
     let output = Command::new("kill")
         .args([pid.to_string().as_str()])
         .output()
-        .context(format!("Failed to kill process {}", pid))?;
-
+        .map_err(|e| format!("Failed to kill process {}: {}", pid, e))?;
     if output.status.success() {
         println!("Killed session [{}] (PID: {})", id, pid);
     } else {
