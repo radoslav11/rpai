@@ -4,8 +4,10 @@ version = "0.1.0"
 edition = "2021"
 description = "A TUI for managing AI coding agent sessions in tmux"
 license = "MIT"
-repository = "https://github.com/yourusername/rpai"
+repository = "https://github.com/radoslav11/rpai"
 readme = "README.md"
+keywords = ["tmux", "tui", "ai", "opencode", "claude"]
+categories = ["command-line-utilities", "development-tools"]
 
 include = [
     "src/**/*",
@@ -30,7 +32,3 @@ ratatui = "0.29"
 [[bin]]
 name = "rpai"
 path = "src/main.rs"
-
-[package.metadata.scripts]
-# Note: rpai.tmux needs to be manually copied after install
-# cargo install --path . && cp rpai.tmux ~/.cargo/bin/
