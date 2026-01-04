@@ -1,11 +1,230 @@
 use anyhow::{Context, Result};
-use chrono::{DateTime, Duration, Utc};
+use chrono::Duration;
+use crossterm::{
+    event::{
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
+        MouseEventKind,
+    },
+    execute,
+    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+};
+use ratatui::{
+    backend::CrosstermBackend,
+    layout::{Constraint, Layout},
+    style::{Color, Modifier, Style},
+    text::{Line, Span},
+    widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
+    Frame, Terminal,
+};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::fs;
+use std::io::{stdout, Stdout};
 use std::os::unix::ffi::OsStrExt;
+use std::path::PathBuf;
 use std::process::Command;
+use std::time::{Duration as StdDuration, Instant};
 use sysinfo::{ProcessRefreshKind, System};
+
+// ============================================================================
+// THEMES
+// ============================================================================
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+enum ThemeName {
+    Gruvbox,
+    Nord,
+    Catppuccin,
+    Dracula,
+    Tokyo,
+    Solarized,
+}
+
+impl ThemeName {
+    fn all() -> Vec<ThemeName> {
+        vec![
+            ThemeName::Gruvbox,
+            ThemeName::Nord,
+            ThemeName::Catppuccin,
+            ThemeName::Dracula,
+            ThemeName::Tokyo,
+            ThemeName::Solarized,
+        ]
+    }
+
+    fn next(&self) -> ThemeName {
+        let all = Self::all();
+        let idx = all.iter().position(|t| t == self).unwrap_or(0);
+        all[(idx + 1) % all.len()]
+    }
+
+    fn name(&self) -> &'static str {
+        match self {
+            ThemeName::Gruvbox => "gruvbox",
+            ThemeName::Nord => "nord",
+            ThemeName::Catppuccin => "catppuccin",
+            ThemeName::Dracula => "dracula",
+            ThemeName::Tokyo => "tokyo",
+            ThemeName::Solarized => "solarized",
+        }
+    }
+
+    fn from_str(s: &str) -> Option<ThemeName> {
+        match s.to_lowercase().as_str() {
+            "gruvbox" => Some(ThemeName::Gruvbox),
+            "nord" => Some(ThemeName::Nord),
+            "catppuccin" | "cat" => Some(ThemeName::Catppuccin),
+            "dracula" => Some(ThemeName::Dracula),
+            "tokyo" | "tokyonight" => Some(ThemeName::Tokyo),
+            "solarized" | "solar" => Some(ThemeName::Solarized),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Theme {
+    fg: Color,
+    dim: Color,
+    accent: Color,
+    green: Color,
+    blue: Color,
+    aqua: Color,
+    orange: Color,
+    selected_bg: Color,
+    folder_icon: Color,
+}
+
+impl Theme {
+    fn from_name(name: ThemeName) -> Self {
+        match name {
+            ThemeName::Gruvbox => Theme {
+                fg: Color::Rgb(235, 219, 178),       // #ebdbb2
+                dim: Color::Rgb(146, 131, 116),      // #928374
+                accent: Color::Rgb(250, 189, 47),    // #fabd2f gold
+                green: Color::Rgb(184, 187, 38),     // #b8bb26
+                blue: Color::Rgb(131, 165, 152),     // #83a598
+                aqua: Color::Rgb(142, 192, 124),     // #8ec07c
+                orange: Color::Rgb(254, 128, 25),    // #fe8019
+                selected_bg: Color::Rgb(80, 73, 69), // #504945
+                folder_icon: Color::Rgb(250, 189, 47),
+            },
+            ThemeName::Nord => Theme {
+                fg: Color::Rgb(236, 239, 244),       // #eceff4
+                dim: Color::Rgb(76, 86, 106),        // #4c566a
+                accent: Color::Rgb(136, 192, 208),   // #88c0d0 frost
+                green: Color::Rgb(163, 190, 140),    // #a3be8c
+                blue: Color::Rgb(129, 161, 193),     // #81a1c1
+                aqua: Color::Rgb(143, 188, 187),     // #8fbcbb
+                orange: Color::Rgb(208, 135, 112),   // #d08770
+                selected_bg: Color::Rgb(67, 76, 94), // #434c5e
+                folder_icon: Color::Rgb(235, 203, 139),
+            },
+            ThemeName::Catppuccin => Theme {
+                fg: Color::Rgb(205, 214, 244),       // #cdd6f4 text
+                dim: Color::Rgb(108, 112, 134),      // #6c7086 overlay0
+                accent: Color::Rgb(245, 194, 231),   // #f5c2e7 pink
+                green: Color::Rgb(166, 227, 161),    // #a6e3a1
+                blue: Color::Rgb(137, 180, 250),     // #89b4fa
+                aqua: Color::Rgb(148, 226, 213),     // #94e2d5 teal
+                orange: Color::Rgb(250, 179, 135),   // #fab387 peach
+                selected_bg: Color::Rgb(69, 71, 90), // #45475a surface0
+                folder_icon: Color::Rgb(250, 179, 135),
+            },
+            ThemeName::Dracula => Theme {
+                fg: Color::Rgb(248, 248, 242),       // #f8f8f2
+                dim: Color::Rgb(98, 114, 164),       // #6272a4 comment
+                accent: Color::Rgb(255, 121, 198),   // #ff79c6 pink
+                green: Color::Rgb(80, 250, 123),     // #50fa7b
+                blue: Color::Rgb(139, 233, 253),     // #8be9fd cyan
+                aqua: Color::Rgb(139, 233, 253),     // #8be9fd
+                orange: Color::Rgb(255, 184, 108),   // #ffb86c
+                selected_bg: Color::Rgb(68, 71, 90), // #44475a
+                folder_icon: Color::Rgb(255, 184, 108),
+            },
+            ThemeName::Tokyo => Theme {
+                fg: Color::Rgb(192, 202, 245),       // #c0caf5
+                dim: Color::Rgb(86, 95, 137),        // #565f89
+                accent: Color::Rgb(187, 154, 247),   // #bb9af7 purple
+                green: Color::Rgb(158, 206, 106),    // #9ece6a
+                blue: Color::Rgb(125, 207, 255),     // #7dcfff
+                aqua: Color::Rgb(115, 218, 202),     // #73daca
+                orange: Color::Rgb(255, 158, 100),   // #ff9e64
+                selected_bg: Color::Rgb(52, 59, 88), // #343b58
+                folder_icon: Color::Rgb(224, 175, 104),
+            },
+            ThemeName::Solarized => Theme {
+                fg: Color::Rgb(131, 148, 150),      // #839496 base0
+                dim: Color::Rgb(88, 110, 117),      // #586e75 base01
+                accent: Color::Rgb(181, 137, 0),    // #b58900 yellow
+                green: Color::Rgb(133, 153, 0),     // #859900
+                blue: Color::Rgb(38, 139, 210),     // #268bd2
+                aqua: Color::Rgb(42, 161, 152),     // #2aa198 cyan
+                orange: Color::Rgb(203, 75, 22),    // #cb4b16
+                selected_bg: Color::Rgb(7, 54, 66), // #073642 base02
+                folder_icon: Color::Rgb(38, 139, 210),
+            },
+        }
+    }
+}
+
+// ============================================================================
+// CONFIG
+// ============================================================================
+
+fn config_dir() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".config")
+        .join("rpai")
+}
+
+fn ensure_config_dir() -> Result<PathBuf> {
+    let dir = config_dir();
+    if !dir.exists() {
+        fs::create_dir_all(&dir)?;
+    }
+    Ok(dir)
+}
+
+fn save_theme(theme: ThemeName) -> Result<()> {
+    let config = ensure_config_dir()?;
+    let path = config.join("theme");
+    fs::write(path, theme.name())?;
+    Ok(())
+}
+
+fn load_theme() -> ThemeName {
+    let path = config_dir().join("theme");
+    if path.exists() {
+        if let Ok(content) = fs::read_to_string(&path) {
+            if let Some(theme) = ThemeName::from_str(content.trim()) {
+                return theme;
+            }
+        }
+    }
+    ThemeName::Gruvbox // default
+}
+
+// ============================================================================
+// SESSION DATA
+// ============================================================================
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+enum SessionState {
+    Running,
+    Waiting,
+}
+
+impl SessionState {
+    fn symbol(&self) -> &str {
+        match self {
+            SessionState::Running => "▶",
+            SessionState::Waiting => "⏸",
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct AiSession {
@@ -16,30 +235,24 @@ struct AiSession {
     pane_id: Option<String>,
     session_name: Option<String>,
     window_index: Option<u32>,
-    status: SessionStatus,
+    pane_width: Option<u32>,
+    pane_height: Option<u32>,
     uptime_seconds: i64,
-    cpu_usage: f32,
     memory_mb: u64,
-    last_activity: Option<DateTime<Utc>>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-enum SessionStatus {
-    Active,
-    Idle,
-    Stale,
+    state: SessionState,
 }
 
 #[derive(Debug, Clone)]
 struct ProcessInfo {
     pid: u32,
+    ppid: u32,
     comm: String,
     cmd: Option<String>,
 }
 
 fn get_process_info_via_ps() -> Result<Vec<ProcessInfo>> {
     let output = Command::new("ps")
-        .args(["-axo", "pid,comm,command"])
+        .args(["-axo", "pid,ppid,comm,command"])
         .output()
         .context("Failed to execute ps command")?;
 
@@ -48,19 +261,51 @@ fn get_process_info_via_ps() -> Result<Vec<ProcessInfo>> {
     if output.status.success() {
         let stdout = String::from_utf8_lossy(&output.stdout);
         for line in stdout.lines().skip(1) {
-            // Skip header
             let parts: Vec<&str> = line.split_whitespace().collect();
-            if parts.len() >= 2 {
+            if parts.len() >= 3 {
                 let pid: u32 = parts.get(0).and_then(|s| s.parse().ok()).unwrap_or(0);
-                let comm = parts.get(1).unwrap_or(&"").to_string();
-                let cmd = parts.get(2).map(|s| s.to_string());
+                let ppid: u32 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+                let comm = parts.get(2).unwrap_or(&"").to_string();
+                let cmd = parts.get(3).map(|s| s.to_string());
 
-                processes.push(ProcessInfo { pid, comm, cmd });
+                processes.push(ProcessInfo {
+                    pid,
+                    ppid,
+                    comm,
+                    cmd,
+                });
             }
         }
     }
 
     Ok(processes)
+}
+
+fn get_cpu_percentage(pid: u32) -> Option<f64> {
+    let output = Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "pcpu="])
+        .output()
+        .ok()?;
+
+    if output.status.success() {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let cpu_str = stdout.trim();
+        cpu_str.parse::<f64>().ok()
+    } else {
+        None
+    }
+}
+
+fn get_session_state(pid: u32) -> SessionState {
+    if let Some(cpu_pct) = get_cpu_percentage(pid) {
+        if cpu_pct > 0.1 {
+            SessionState::Running
+        } else {
+            SessionState::Waiting
+        }
+    } else {
+        SessionState::Waiting
+    }
 }
 
 fn get_cwd_via_lsof(pid: u32) -> Option<String> {
@@ -89,6 +334,8 @@ struct TmuxPaneInfo {
     pane_id: String,
     session_name: String,
     window_index: u32,
+    pane_width: u32,
+    pane_height: u32,
 }
 
 fn get_tmux_pane_info() -> Result<HashMap<u32, TmuxPaneInfo>> {
@@ -97,7 +344,7 @@ fn get_tmux_pane_info() -> Result<HashMap<u32, TmuxPaneInfo>> {
             "list-panes",
             "-a",
             "-F",
-            "#{pane_pid}\t#{pane_id}\t#{session_name}\t#{window_index}",
+            "#{pane_pid}\t#{pane_id}\t#{session_name}\t#{window_index}\t#{pane_width}\t#{pane_height}",
         ])
         .output()
         .context("Failed to execute tmux command")?;
@@ -107,7 +354,7 @@ fn get_tmux_pane_info() -> Result<HashMap<u32, TmuxPaneInfo>> {
     if output.status.success() {
         for line in String::from_utf8_lossy(&output.stdout).lines() {
             let parts: Vec<&str> = line.split('\t').collect();
-            if parts.len() >= 4 {
+            if parts.len() >= 6 {
                 let pid: u32 = parts.get(0).and_then(|s| s.parse().ok()).unwrap_or(0);
 
                 if pid > 0 {
@@ -115,6 +362,8 @@ fn get_tmux_pane_info() -> Result<HashMap<u32, TmuxPaneInfo>> {
                         pane_id: parts.get(1).unwrap_or(&"").to_string(),
                         session_name: parts.get(2).unwrap_or(&"").to_string(),
                         window_index: parts.get(3).and_then(|s| s.parse().ok()).unwrap_or(0),
+                        pane_width: parts.get(4).and_then(|s| s.parse().ok()).unwrap_or(0),
+                        pane_height: parts.get(5).and_then(|s| s.parse().ok()).unwrap_or(0),
                     };
                     pane_map.insert(pid, pane_info);
                 }
@@ -123,6 +372,33 @@ fn get_tmux_pane_info() -> Result<HashMap<u32, TmuxPaneInfo>> {
     }
 
     Ok(pane_map)
+}
+
+fn find_tmux_pane_for_pid(
+    pid: u32,
+    process_map: &HashMap<u32, ProcessInfo>,
+    tmux_panes: &HashMap<u32, TmuxPaneInfo>,
+) -> Option<TmuxPaneInfo> {
+    let mut current_pid = pid;
+    let max_steps = 25;
+
+    for _ in 0..max_steps {
+        if let Some(pane_info) = tmux_panes.get(&current_pid) {
+            return Some(pane_info.clone());
+        }
+
+        if let Some(process_info) = process_map.get(&current_pid) {
+            current_pid = process_info.ppid;
+
+            if current_pid == 0 || current_pid == 1 {
+                break;
+            }
+        } else {
+            break;
+        }
+    }
+
+    None
 }
 
 fn scan_ai_processes() -> Result<Vec<AiSession>> {
@@ -134,17 +410,22 @@ fn scan_ai_processes() -> Result<Vec<AiSession>> {
     );
 
     let ps_processes = get_process_info_via_ps()?;
-    let ps_map: HashMap<u32, ProcessInfo> = ps_processes.into_iter().map(|p| (p.pid, p)).collect();
+    let ps_map: HashMap<u32, ProcessInfo> = ps_processes
+        .clone()
+        .into_iter()
+        .map(|p| (p.pid, p))
+        .collect();
 
     let tmux_panes = get_tmux_pane_info().unwrap_or_default();
 
     let agent_pattern = Regex::new(r"(?i)(opencode|claude|codex|cursor)")?;
-    let mut sessions = Vec::new();
 
+    // First pass: find all matching PIDs
+    let mut matched_pids: Vec<(u32, ProcessInfo)> = Vec::new();
     for (pid, process) in system.processes() {
         let process_info = ps_map.get(&pid.as_u32());
 
-        let (agent_type, is_match) = if let Some(info) = process_info {
+        let (_agent_type, is_match) = if let Some(info) = process_info {
             let comm_lower = info.comm.to_lowercase();
             let cmd_lower = info
                 .cmd
@@ -152,7 +433,7 @@ fn scan_ai_processes() -> Result<Vec<AiSession>> {
                 .map(|c| c.to_lowercase())
                 .unwrap_or_default();
 
-            // Filter out system services that happen to match agent names
+            // Filter out system services
             if comm_lower.contains("cursoruiviewservice")
                 || cmd_lower.contains("cursoruiviewservice")
             {
@@ -183,18 +464,16 @@ fn scan_ai_processes() -> Result<Vec<AiSession>> {
                 } else {
                     "unknown"
                 }
+            } else if comm_lower.contains("opencode") {
+                "opencode"
+            } else if comm_lower.contains("claude") {
+                "claude"
+            } else if comm_lower.contains("codex") {
+                "codex"
+            } else if comm_lower.contains("cursor") {
+                "cursor"
             } else {
-                if comm_lower.contains("opencode") {
-                    "opencode"
-                } else if comm_lower.contains("claude") {
-                    "claude"
-                } else if comm_lower.contains("codex") {
-                    "codex"
-                } else if comm_lower.contains("cursor") {
-                    "cursor"
-                } else {
-                    "unknown"
-                }
+                "unknown"
             };
 
             (agent_type.to_string(), matched)
@@ -222,132 +501,100 @@ fn scan_ai_processes() -> Result<Vec<AiSession>> {
             continue;
         }
 
-        let working_dir = process
-            .cwd()
-            .map(|p| p.display().to_string())
-            .unwrap_or_else(|| {
-                get_cwd_via_lsof(pid.as_u32()).unwrap_or_else(|| "unknown".to_string())
-            });
-
-        let uptime = Duration::seconds(process.run_time() as i64);
-        let memory_mb = process.memory() / 1024 / 1024;
-        let cpu_usage = process.cpu_usage();
-
-        let status = AiSession::determine_status(uptime, cpu_usage);
-
-        let tmux_info = tmux_panes.get(&pid.as_u32());
-
-        let (pane_id, session_name, window_index) = if let Some(info) = tmux_info {
-            (
-                Some(info.pane_id.clone()),
-                Some(info.session_name.clone()),
-                Some(info.window_index),
-            )
-        } else {
-            (None, None, None)
-        };
-
-        sessions.push(AiSession {
-            pid: pid.as_u32(),
-            agent_type,
-            working_dir,
-            name: None,
-            pane_id,
-            session_name,
-            window_index,
-            status,
-            uptime_seconds: uptime.num_seconds(),
-            cpu_usage,
-            memory_mb,
-            last_activity: None,
-        });
+        // Store matched process with full info
+        if let Some(info) = process_info {
+            matched_pids.push((pid.as_u32(), info.clone()));
+        }
     }
 
-    // Sort sessions for consistent display: by agent type, then by PID
+    // Filter out subprocesses - only keep processes whose parent is not also an AI agent
+    let matched_pid_set: std::collections::HashSet<u32> =
+        matched_pids.iter().map(|(pid, _)| *pid).collect();
+    let mut sessions = Vec::new();
+
+    for (pid, process_info) in matched_pids {
+        // Skip if parent is also an AI agent
+        if matched_pid_set.contains(&process_info.ppid) {
+            continue;
+        }
+
+        let comm_lower = process_info.comm.to_lowercase();
+        let cmd_lower = process_info
+            .cmd
+            .as_ref()
+            .map(|c| c.to_lowercase())
+            .unwrap_or_default();
+
+        // Determine agent type again
+        let agent_type = if cmd_lower.contains("opencode") {
+            "opencode"
+        } else if cmd_lower.contains("claude") {
+            "claude"
+        } else if cmd_lower.contains("codex") {
+            "codex"
+        } else if cmd_lower.contains("cursor") {
+            "cursor"
+        } else if comm_lower.contains("opencode") {
+            "opencode"
+        } else if comm_lower.contains("claude") {
+            "claude"
+        } else if comm_lower.contains("codex") {
+            "codex"
+        } else if comm_lower.contains("cursor") {
+            "cursor"
+        } else {
+            "unknown"
+        };
+
+        // Get process from sysinfo
+        let sysinfo_pid = sysinfo::Pid::from_u32(pid);
+        if let Some(process) = system.process(sysinfo_pid) {
+            let working_dir = process
+                .cwd()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| get_cwd_via_lsof(pid).unwrap_or_else(|| "unknown".to_string()));
+
+            let uptime = Duration::seconds(process.run_time() as i64);
+            let memory_mb = process.memory() / 1024 / 1024;
+
+            let tmux_info = find_tmux_pane_for_pid(pid, &ps_map, &tmux_panes);
+
+            let (pane_id, session_name, window_index, pane_width, pane_height) =
+                if let Some(info) = tmux_info {
+                    (
+                        Some(info.pane_id.clone()),
+                        Some(info.session_name.clone()),
+                        Some(info.window_index),
+                        Some(info.pane_width),
+                        Some(info.pane_height),
+                    )
+                } else {
+                    (None, None, None, None, None)
+                };
+
+            sessions.push(AiSession {
+                pid,
+                agent_type: agent_type.to_string(),
+                working_dir,
+                name: None,
+                pane_id,
+                session_name,
+                window_index,
+                pane_width,
+                pane_height,
+                uptime_seconds: uptime.num_seconds(),
+                memory_mb,
+                state: get_session_state(pid),
+            });
+        }
+    }
+
     sessions.sort_by(|a, b| match a.agent_type.cmp(&b.agent_type) {
         std::cmp::Ordering::Equal => a.pid.cmp(&b.pid),
         other => other,
     });
 
     Ok(sessions)
-}
-
-impl AiSession {
-    fn determine_status(uptime: Duration, cpu_usage: f32) -> SessionStatus {
-        if cpu_usage > 1.0 || uptime.num_minutes() < 1 {
-            SessionStatus::Active
-        } else if uptime.num_minutes() < 30 {
-            SessionStatus::Idle
-        } else {
-            SessionStatus::Stale
-        }
-    }
-}
-
-fn display_sessions(sessions: &[AiSession]) {
-    if sessions.is_empty() {
-        println!("No AI agent processes detected");
-        return;
-    }
-
-    println!("AI Agent Sessions:");
-    println!();
-
-    for (i, session) in sessions.iter().enumerate() {
-        let status_indicator = match session.status {
-            SessionStatus::Active => "●",
-            SessionStatus::Idle => "○",
-            SessionStatus::Stale => "○",
-        };
-
-        println!(
-            "{} [{}] {} | {} | {}",
-            status_indicator,
-            i + 1,
-            session.agent_type,
-            format_status(&session.status),
-            format_duration(session.uptime_seconds)
-        );
-
-        println!(
-            "    PID: {} | Mem: {}MB | CPU: {:.1}%",
-            session.pid, session.memory_mb, session.cpu_usage
-        );
-
-        // Display tmux info if available
-        if let (Some(session_name), Some(window_index), Some(pane_id)) = (
-            &session.session_name,
-            &session.window_index,
-            &session.pane_id,
-        ) {
-            println!(
-                "    Session: {} | Window: {} | Pane: {}",
-                session_name, window_index, pane_id
-            );
-        }
-
-        let cwd = if session.working_dir.len() > 60 {
-            format!(
-                "...{}",
-                &session.working_dir[session.working_dir.len() - 57..]
-            )
-        } else {
-            session.working_dir.clone()
-        };
-        println!("    {}", cwd);
-
-        if i < sessions.len() - 1 {
-            println!();
-        }
-    }
-}
-
-fn format_status(status: &SessionStatus) -> String {
-    match status {
-        SessionStatus::Active => "Active".to_string(),
-        SessionStatus::Idle => "Idle".to_string(),
-        SessionStatus::Stale => "Stale".to_string(),
-    }
 }
 
 fn format_duration(seconds: i64) -> String {
@@ -360,6 +607,652 @@ fn format_duration(seconds: i64) -> String {
         format!("{}m", minutes)
     } else {
         format!("{}s", seconds)
+    }
+}
+
+// Format path with visual hierarchy
+fn format_path_visual(path: &str, max_len: usize, theme: &Theme) -> Vec<Span<'static>> {
+    // Handle home directory
+    let home = dirs::home_dir().map(|p| p.display().to_string());
+    let display_path = if let Some(ref home_path) = home {
+        if path.starts_with(home_path) {
+            format!("~{}", &path[home_path.len()..])
+        } else {
+            path.to_string()
+        }
+    } else {
+        path.to_string()
+    };
+
+    let parts: Vec<&str> = display_path.split('/').filter(|s| !s.is_empty()).collect();
+
+    if parts.is_empty() {
+        return vec![Span::styled(
+            path.to_string(),
+            Style::default().fg(theme.dim),
+        )];
+    }
+
+    // Calculate if we need to truncate
+    let total_len: usize = parts.iter().map(|p| p.len() + 3).sum(); // +3 for " / "
+
+    let mut spans = Vec::new();
+
+    // Folder icon
+    spans.push(Span::styled(" ", Style::default().fg(theme.folder_icon)));
+
+    if total_len > max_len && parts.len() > 2 {
+        // Show first part, ..., last two parts
+        spans.push(Span::styled(
+            format!(" {}", parts[0]),
+            Style::default().fg(theme.dim),
+        ));
+        spans.push(Span::styled(
+            " / ... / ",
+            Style::default().fg(theme.dim).add_modifier(Modifier::DIM),
+        ));
+
+        let last_idx = parts.len() - 1;
+        if parts.len() > 2 {
+            spans.push(Span::styled(
+                parts[last_idx - 1].to_string(),
+                Style::default().fg(theme.dim),
+            ));
+            spans.push(Span::styled(
+                " / ",
+                Style::default().fg(theme.dim).add_modifier(Modifier::DIM),
+            ));
+        }
+        spans.push(Span::styled(
+            parts[last_idx].to_string(),
+            Style::default().fg(theme.fg),
+        ));
+    } else {
+        // Show full path with styled separators
+        for (i, part) in parts.iter().enumerate() {
+            if i > 0 {
+                spans.push(Span::styled(
+                    " / ",
+                    Style::default().fg(theme.dim).add_modifier(Modifier::DIM),
+                ));
+            } else {
+                spans.push(Span::styled(" ", Style::default()));
+            }
+
+            // Last part is brighter
+            let style = if i == parts.len() - 1 {
+                Style::default().fg(theme.fg)
+            } else {
+                Style::default().fg(theme.dim)
+            };
+            spans.push(Span::styled(part.to_string(), style));
+        }
+    }
+
+    spans
+}
+
+// ============================================================================
+// TUI APP
+// ============================================================================
+
+#[derive(Debug, Clone, PartialEq)]
+enum AppMode {
+    Normal,
+    Command,
+}
+
+struct App {
+    sessions: Vec<AiSession>,
+    list_state: ListState,
+    should_quit: bool,
+    selected_session: Option<usize>,
+    theme_name: ThemeName,
+    theme: Theme,
+    mode: AppMode,
+    command_input: String,
+    status_message: Option<String>,
+    last_refresh: Instant,
+}
+
+impl App {
+    fn new(sessions: Vec<AiSession>) -> Self {
+        let theme_name = load_theme();
+        let theme = Theme::from_name(theme_name);
+        let mut list_state = ListState::default();
+        if !sessions.is_empty() {
+            list_state.select(Some(0));
+        }
+        Self {
+            sessions,
+            list_state,
+            should_quit: false,
+            selected_session: None,
+            theme_name,
+            theme,
+            mode: AppMode::Normal,
+            command_input: String::new(),
+            status_message: None,
+            last_refresh: Instant::now(),
+        }
+    }
+
+    fn next(&mut self) {
+        if self.sessions.is_empty() {
+            return;
+        }
+        let i = match self.list_state.selected() {
+            Some(i) => {
+                if i >= self.sessions.len() - 1 {
+                    0
+                } else {
+                    i + 1
+                }
+            }
+            None => 0,
+        };
+        self.list_state.select(Some(i));
+    }
+
+    fn previous(&mut self) {
+        if self.sessions.is_empty() {
+            return;
+        }
+        let i = match self.list_state.selected() {
+            Some(i) => {
+                if i == 0 {
+                    self.sessions.len() - 1
+                } else {
+                    i - 1
+                }
+            }
+            None => 0,
+        };
+        self.list_state.select(Some(i));
+    }
+
+    fn select(&mut self) {
+        self.selected_session = self.list_state.selected();
+        self.should_quit = true;
+    }
+
+    fn set_theme(&mut self, name: ThemeName) {
+        self.theme_name = name;
+        self.theme = Theme::from_name(name);
+        let _ = save_theme(name);
+        self.status_message = Some(format!("Theme set to: {}", name.name()));
+    }
+
+    fn cycle_theme(&mut self) {
+        self.set_theme(self.theme_name.next());
+    }
+
+    fn execute_command(&mut self) {
+        let cmd = self.command_input.trim().to_lowercase();
+
+        if cmd.starts_with("theme") {
+            let parts: Vec<&str> = cmd.split_whitespace().collect();
+            if parts.len() > 1 {
+                if let Some(theme) = ThemeName::from_str(parts[1]) {
+                    self.set_theme(theme);
+                } else {
+                    self.status_message = Some(format!(
+                        "Unknown theme. Available: {}",
+                        ThemeName::all()
+                            .iter()
+                            .map(|t| t.name())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ));
+                }
+            } else {
+                self.cycle_theme();
+            }
+        } else if cmd == "themes" || cmd == "list" {
+            self.status_message = Some(format!(
+                "Themes: {}",
+                ThemeName::all()
+                    .iter()
+                    .map(|t| t.name())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        } else if cmd == "q" || cmd == "quit" {
+            self.should_quit = true;
+        } else if !cmd.is_empty() {
+            self.status_message = Some(format!("Unknown command: {}", cmd));
+        }
+
+        self.command_input.clear();
+        self.mode = AppMode::Normal;
+    }
+}
+
+fn setup_terminal() -> Result<Terminal<CrosstermBackend<Stdout>>> {
+    enable_raw_mode()?;
+    let mut stdout = stdout();
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    let backend = CrosstermBackend::new(stdout);
+    let terminal = Terminal::new(backend)?;
+    Ok(terminal)
+}
+
+fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
+    disable_raw_mode()?;
+    execute!(
+        terminal.backend_mut(),
+        LeaveAlternateScreen,
+        DisableMouseCapture
+    )?;
+    terminal.show_cursor()?;
+    Ok(())
+}
+
+fn ui(frame: &mut Frame, app: &mut App) {
+    let area = frame.area();
+    let theme = &app.theme;
+
+    // Main layout: header, list, status/command, help bar
+    let chunks = Layout::vertical([
+        Constraint::Length(3), // Header
+        Constraint::Min(5),    // List
+        Constraint::Length(1), // Status/command line
+        Constraint::Length(2), // Help bar
+    ])
+    .split(area);
+
+    // Header
+    let header = Paragraph::new(Line::from(vec![
+        Span::styled(
+            " rpai ",
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("- AI Agent Sessions", Style::default().fg(theme.fg)),
+    ]))
+    .block(
+        Block::default()
+            .borders(Borders::BOTTOM)
+            .border_style(Style::default().fg(theme.dim)),
+    );
+    frame.render_widget(header, chunks[0]);
+
+    // Session list
+    if app.sessions.is_empty() {
+        let empty = Paragraph::new(Line::from(vec![Span::styled(
+            "  No AI agent processes detected",
+            Style::default().fg(theme.orange),
+        )]))
+        .block(Block::default());
+        frame.render_widget(empty, chunks[1]);
+    } else {
+        let items: Vec<ListItem> = app
+            .sessions
+            .iter()
+            .enumerate()
+            .map(|(i, session)| {
+                let is_selected = app.list_state.selected() == Some(i);
+                create_session_list_item(session, i, is_selected, chunks[1].width, theme)
+            })
+            .collect();
+
+        let list = List::new(items)
+            .block(Block::default())
+            .highlight_style(Style::default().bg(theme.selected_bg));
+
+        frame.render_stateful_widget(list, chunks[1], &mut app.list_state);
+    }
+
+    // Status/command line
+    let status_line = match &app.mode {
+        AppMode::Command => Paragraph::new(Line::from(vec![
+            Span::styled(":", Style::default().fg(theme.accent)),
+            Span::styled(app.command_input.clone(), Style::default().fg(theme.fg)),
+            Span::styled("_", Style::default().fg(theme.accent)),
+        ])),
+        AppMode::Normal => {
+            if let Some(msg) = &app.status_message {
+                Paragraph::new(Line::from(vec![Span::styled(
+                    format!(" {}", msg),
+                    Style::default().fg(theme.aqua),
+                )]))
+            } else {
+                Paragraph::new("")
+            }
+        }
+    };
+    frame.render_widget(status_line, chunks[2]);
+
+    // Help bar
+    let help_spans = if app.mode == AppMode::Command {
+        vec![
+            Span::styled(" Enter", Style::default().fg(theme.green)),
+            Span::styled(" execute  ", Style::default().fg(theme.dim)),
+            Span::styled("Esc", Style::default().fg(theme.green)),
+            Span::styled(" cancel", Style::default().fg(theme.dim)),
+        ]
+    } else {
+        vec![
+            Span::styled(" j/k", Style::default().fg(theme.green)),
+            Span::styled(" nav  ", Style::default().fg(theme.dim)),
+            Span::styled("Enter", Style::default().fg(theme.green)),
+            Span::styled(" jump  ", Style::default().fg(theme.dim)),
+            Span::styled("/", Style::default().fg(theme.green)),
+            Span::styled(" cmd  ", Style::default().fg(theme.dim)),
+            Span::styled("t", Style::default().fg(theme.green)),
+            Span::styled(" theme  ", Style::default().fg(theme.dim)),
+            Span::styled("q", Style::default().fg(theme.green)),
+            Span::styled(" quit", Style::default().fg(theme.dim)),
+        ]
+    };
+
+    let help = Paragraph::new(Line::from(help_spans)).block(
+        Block::default()
+            .borders(Borders::TOP)
+            .border_style(Style::default().fg(theme.dim)),
+    );
+    frame.render_widget(help, chunks[3]);
+}
+
+fn create_session_list_item(
+    session: &AiSession,
+    idx: usize,
+    is_selected: bool,
+    width: u16,
+    theme: &Theme,
+) -> ListItem<'static> {
+    let prefix = if is_selected { " " } else { "  " };
+    let prefix_style = if is_selected {
+        Style::default()
+            .fg(theme.green)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(theme.dim)
+    };
+
+    // First line: agent type and uptime
+    let state_color = if session.state == SessionState::Running {
+        theme.green
+    } else {
+        theme.dim
+    };
+    let line1 = Line::from(vec![
+        Span::styled(prefix, prefix_style),
+        Span::styled(format!("[{}] ", idx + 1), Style::default().fg(theme.dim)),
+        Span::styled(
+            format!("{:<10}", session.agent_type),
+            Style::default().fg(theme.aqua).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" | ", Style::default().fg(theme.dim)),
+        Span::styled(
+            session.state.symbol().to_string(),
+            Style::default().fg(state_color),
+        ),
+        Span::styled(" ", Style::default().fg(theme.dim)),
+        Span::styled(
+            format!("PID: {}", session.pid),
+            Style::default().fg(theme.green),
+        ),
+        Span::styled(" | ", Style::default().fg(theme.dim)),
+        Span::styled(" ", Style::default().fg(theme.dim)),
+        Span::styled(
+            format_duration(session.uptime_seconds),
+            Style::default().fg(theme.fg),
+        ),
+        Span::styled(" | ", Style::default().fg(theme.dim)),
+        Span::styled(" ", Style::default().fg(theme.dim)),
+        Span::styled(
+            format!("{}MB", session.memory_mb),
+            Style::default().fg(theme.fg),
+        ),
+    ]);
+
+    // Second line: PID and tmux info
+    let line2 = if let (Some(session_name), Some(window_index), Some(pane_id)) = (
+        &session.session_name,
+        &session.window_index,
+        &session.pane_id,
+    ) {
+        Line::from(vec![
+            Span::styled("     ", Style::default()),
+            Span::styled(" ", Style::default().fg(theme.blue)),
+            Span::styled(" ", Style::default()),
+            Span::styled(
+                format!("{}:{} {}", session_name, window_index, pane_id,),
+                Style::default().fg(theme.blue),
+            ),
+            Span::styled(
+                format!(
+                    " [{}x{}]",
+                    session.pane_width.unwrap_or(0),
+                    session.pane_height.unwrap_or(0)
+                ),
+                Style::default().fg(theme.dim),
+            ),
+        ])
+    } else {
+        Line::from(vec![
+            Span::styled("     ", Style::default()),
+            Span::styled(" ", Style::default().fg(theme.dim)),
+            Span::styled(" not in tmux", Style::default().fg(theme.dim)),
+        ])
+    };
+
+    // Third line: working directory with visual formatting
+    let max_cwd_len = (width as usize).saturating_sub(10);
+    let mut path_spans = vec![Span::styled("     ", Style::default())];
+    path_spans.extend(format_path_visual(&session.working_dir, max_cwd_len, theme));
+    let line3 = Line::from(path_spans);
+
+    // Empty line for spacing
+    let line4 = Line::from("");
+
+    ListItem::new(vec![line1, line2, line3, line4])
+}
+
+fn run_tui(sessions: Vec<AiSession>) -> Result<Option<AiSession>> {
+    let mut terminal = setup_terminal()?;
+    let mut app = App::new(sessions);
+
+    // Calculate lines per session item (4 lines each)
+    let lines_per_item = 4;
+
+    loop {
+        terminal.draw(|frame| ui(frame, &mut app))?;
+
+        // Check for events with 1-second timeout
+        if event::poll(StdDuration::from_millis(1000))? {
+            match event::read()? {
+                Event::Key(key) => {
+                    if key.kind == KeyEventKind::Press {
+                        // Clear status message on any key
+                        app.status_message = None;
+
+                        match &app.mode {
+                            AppMode::Command => match key.code {
+                                KeyCode::Enter => {
+                                    app.execute_command();
+                                }
+                                KeyCode::Esc => {
+                                    app.command_input.clear();
+                                    app.mode = AppMode::Normal;
+                                }
+                                KeyCode::Backspace => {
+                                    app.command_input.pop();
+                                }
+                                KeyCode::Char(c) => {
+                                    app.command_input.push(c);
+                                }
+                                _ => {}
+                            },
+                            AppMode::Normal => {
+                                // Ctrl-C handling
+                                if key.modifiers.contains(KeyModifiers::CONTROL)
+                                    && key.code == KeyCode::Char('c')
+                                {
+                                    app.should_quit = true;
+                                } else {
+                                    match key.code {
+                                        KeyCode::Char('q') | KeyCode::Esc => {
+                                            app.should_quit = true;
+                                        }
+                                        KeyCode::Char('/') | KeyCode::Char(':') => {
+                                            app.mode = AppMode::Command;
+                                        }
+                                        KeyCode::Char('t') => {
+                                            app.cycle_theme();
+                                        }
+                                        KeyCode::Down | KeyCode::Char('j') => {
+                                            app.next();
+                                        }
+                                        KeyCode::Up | KeyCode::Char('k') => {
+                                            app.previous();
+                                        }
+                                        KeyCode::Enter => {
+                                            app.select();
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                Event::Mouse(mouse) => {
+                    if app.mode == AppMode::Normal {
+                        match mouse.kind {
+                            MouseEventKind::Down(_) => {
+                                // Calculate which session was clicked
+                                // Header is 3 lines, so list starts at row 3
+                                let list_start_row = 3u16;
+                                if mouse.row >= list_start_row && !app.sessions.is_empty() {
+                                    let clicked_row = (mouse.row - list_start_row) as usize;
+                                    let clicked_index = clicked_row / lines_per_item;
+                                    if clicked_index < app.sessions.len() {
+                                        app.list_state.select(Some(clicked_index));
+                                    }
+                                }
+                            }
+                            MouseEventKind::ScrollDown => {
+                                app.next();
+                            }
+                            MouseEventKind::ScrollUp => {
+                                app.previous();
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                _ => {}
+            }
+        } else {
+            // Timeout - refresh sessions
+            if let Ok(new_sessions) = scan_ai_processes() {
+                // Preserve selected session by PID
+                let selected_pid = app
+                    .list_state
+                    .selected()
+                    .and_then(|i| app.sessions.get(i))
+                    .map(|s| s.pid);
+
+                app.sessions = new_sessions;
+
+                // Restore selection
+                if let Some(pid) = selected_pid {
+                    let new_index = app.sessions.iter().position(|s| s.pid == pid);
+                    app.list_state.select(new_index);
+                }
+            }
+            app.last_refresh = Instant::now();
+        }
+
+        if app.should_quit {
+            break;
+        }
+    }
+
+    restore_terminal(&mut terminal)?;
+
+    Ok(app
+        .selected_session
+        .and_then(|i| app.sessions.get(i).cloned()))
+}
+
+fn jump_to_session(session: &AiSession) -> Result<()> {
+    if let (Some(session_name), Some(window_index), Some(pane_id)) = (
+        &session.session_name,
+        &session.window_index,
+        &session.pane_id,
+    ) {
+        let window_target = format!("{}:{}", session_name, window_index);
+        let pane_target = format!("{}:{}.{}", session_name, window_index, pane_id);
+
+        Command::new("tmux")
+            .args(["select-window", "-t", &window_target])
+            .output()
+            .context("Failed to execute tmux select-window command")?;
+
+        let output = Command::new("tmux")
+            .args(["select-pane", "-t", &pane_target])
+            .output()
+            .context("Failed to execute tmux select-pane command")?;
+
+        if output.status.success() {
+            println!(
+                "Switched to session: {} (Window: {}, Pane: {})",
+                session_name, window_index, pane_id
+            );
+        } else {
+            println!("Failed to switch to session");
+        }
+    } else {
+        println!("No tmux session info available for this process");
+    }
+
+    Ok(())
+}
+
+fn display_sessions(sessions: &[AiSession]) {
+    if sessions.is_empty() {
+        println!("No AI agent processes detected");
+        return;
+    }
+
+    println!("AI Agent Sessions:");
+    println!();
+
+    for (i, session) in sessions.iter().enumerate() {
+        println!(
+            "[{}] {} {} | {} | PID: {} | {}MB",
+            i + 1,
+            session.agent_type,
+            session.state.symbol(),
+            format_duration(session.uptime_seconds),
+            session.pid,
+            session.memory_mb
+        );
+
+        if let (Some(session_name), Some(window_index), Some(pane_id)) = (
+            &session.session_name,
+            &session.window_index,
+            &session.pane_id,
+        ) {
+            println!(
+                "     {}:{} {} [{}x{}]",
+                session_name,
+                window_index,
+                pane_id,
+                session.pane_width.unwrap_or(0),
+                session.pane_height.unwrap_or(0)
+            );
+        }
+
+        println!("     {}", session.working_dir);
+
+        if i < sessions.len() - 1 {
+            println!();
+        }
     }
 }
 
@@ -416,18 +1309,71 @@ fn main() -> Result<()> {
                 println!("Use 'rpai scan' to see available sessions");
             }
         }
+        Some("theme") => {
+            if let Some(theme_name) = args.get(2) {
+                if let Some(theme) = ThemeName::from_str(theme_name) {
+                    save_theme(theme)?;
+                    println!("Theme set to: {}", theme.name());
+                } else {
+                    println!("Unknown theme: {}", theme_name);
+                    println!(
+                        "Available themes: {}",
+                        ThemeName::all()
+                            .iter()
+                            .map(|t| t.name())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    );
+                }
+            } else {
+                println!("Current theme: {}", load_theme().name());
+                println!(
+                    "Available themes: {}",
+                    ThemeName::all()
+                        .iter()
+                        .map(|t| t.name())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+            }
+        }
         Some("help") | Some("-h") | Some("--help") => {
-            println!("rpai - Tmux plugin for AI agent session management");
+            println!("rpai - AI Agent Session Manager for tmux");
             println!();
             println!("Usage:");
-            println!("  rpai [scan]        - Scan and display AI agent sessions");
-            println!("  rpai kill <id>     - Terminate a session");
+            println!("  rpai                - Interactive TUI (default)");
+            println!("  rpai scan           - Scan and display AI agent sessions");
+            println!("  rpai kill <id>      - Terminate a session");
+            println!("  rpai theme [name]   - Show/set theme");
             println!("  rpai help           - Show this help message");
+            println!();
+            println!("Keyboard shortcuts (TUI mode):");
+            println!("  j/k or Up/Down      - Navigate sessions");
+            println!("  Enter               - Jump to selected session");
+            println!("  t                   - Cycle through themes");
+            println!("  / or :              - Enter command mode");
+            println!("  q, Esc, Ctrl-C      - Quit");
+            println!();
+            println!("Commands (type after /):");
+            println!("  theme [name]        - Switch theme");
+            println!("  themes              - List available themes");
+            println!();
+            println!(
+                "Available themes: {}",
+                ThemeName::all()
+                    .iter()
+                    .map(|t| t.name())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            println!();
+            println!("Config: ~/.config/rpai/");
         }
         _ => {
-            // Default to scan mode
             let sessions = scan_ai_processes()?;
-            display_sessions(&sessions);
+            if let Some(selected) = run_tui(sessions)? {
+                jump_to_session(&selected)?;
+            }
         }
     }
 
