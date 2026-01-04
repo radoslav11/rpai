@@ -1,11 +1,6 @@
 /target
 Cargo.lock
 **/*.rs.bk
+debug_*.rs
+test_*.rs
 .DS_Store
-
-
-# Added by cargo
-#
-# already existing elements were commented out
-
-#/target
