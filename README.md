@@ -1,20 +1,17 @@
 # rpai
 
 <div align="center">
-  <img src="panda.png" width="100" alt="rpai logo">
+  <img src="assets/redpanda.png" width="120" alt="rpai logo">
 </div>
 
-A TUI for managing multiple AI coding agent sessions (opencode, claude, codex, cursor) in tmux.
+A tool for managing multiple AI coding agent sessions (opencode, claude, codex, cursor) in tmux.
 
 ## Features
 
-- Interactive TUI with mouse support
-- Scan for running AI agent processes
-- **Auto-refreshes every second** - stays up-to-date with session state
-- **Running/Waiting indicator** - shows if agent is active or waiting for input (▶/⏸)
-- Jump to any AI session with Enter
-- Multiple color themes (gruvbox, nord, catppuccin, dracula, tokyo, solarized)
-- Opens as a tmux popup window
+- Scan for running AI agent processes and ability to jump around.
+- **Running/Waiting indicator** - shows if agent is active or stale (▶/⏸).
+- Multiple color themes (gruvbox, nord, catppuccin, dracula, tokyo, solarized).
+- Recommended workflow is to map to a tmux popup window.
 
 ## Installation
 
@@ -29,17 +26,6 @@ cargo install rpai
 ```bash
 git clone https://github.com/radoslav11/rpai.git
 cd rpai
-cargo install --path .
-```
-
-This builds and installs `rpai` to `~/.cargo/bin/rpai` automatically.
-Cargo handles the build and installation - you don't need to copy files manually.
-
-### Option 3: Quick build script
-
-```bash
-git clone https://github.com/radoslav11/rpai.git
-cd rpai
 ./install.sh
 ```
 
@@ -47,7 +33,7 @@ This builds and installs rpai in one step.
 
 ## Tmux Setup
 
-Add this line to your `~/.tmux.conf`:
+Add this line to your `~/.tmux.conf` (or alternative mapping).
 
 ```bash
 bind-key a display-popup -E "rpai"
@@ -68,7 +54,7 @@ tmux source ~/.tmux.conf
 ```bash
 rpai                # Interactive TUI (default)
 rpai scan           # List sessions (non-interactive)
-rpai jump <id>      # Jump to session by ID
+rpai jump <id|name> # Jump to session by ID or name
 rpai kill <id>      # Terminate a session
 rpai theme [name]   # Show/set theme
 rpai help           # Show help
@@ -101,14 +87,6 @@ rpai help           # Show help
 - **solarized** - Classic solarized dark
 
 Theme is persisted to `~/.config/rpai/theme`
-
-## How It Works
-
-1. Scans all processes for AI agent patterns (opencode, claude, codex, cursor)
-2. Walks the process tree to find the tmux pane containing each agent
-3. Displays sessions with agent type, PID, state (▶/⏸), uptime, memory usage, tmux location, and working directory
-4. When you select a session, jumps directly to that tmux pane
-5. Auto-refreshes every second to show current CPU usage and session state
 
 ## Config Directory
 

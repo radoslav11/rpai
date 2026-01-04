@@ -1126,18 +1126,13 @@ fn jump_to_session(session: &AiSession) -> Result<()> {
         &session.window_index,
         &session.pane_id,
     ) {
-        let window_target = format!("{}:{}", session_name, window_index);
         let pane_target = format!("{}:{}.{}", session_name, window_index, pane_id);
 
-        Command::new("tmux")
-            .args(["select-window", "-t", &window_target])
-            .output()
-            .map_err(|e| format!("Failed to execute tmux select-window command: {}", e))?;
-
+        // Use switch-client to switch to the target session/window/pane
         let output = Command::new("tmux")
-            .args(["select-pane", "-t", &pane_target])
+            .args(["switch-client", "-t", &pane_target])
             .output()
-            .map_err(|e| format!("Failed to execute tmux select-pane command: {}", e))?;
+            .map_err(|e| format!("Failed to execute tmux switch-client command: {}", e))?;
 
         if output.status.success() {
             println!(
@@ -1251,8 +1246,9 @@ fn main() -> Result<()> {
         }
         Some("jump") => {
             if let Some(id_str) = args.get(2) {
+                let sessions = scan_ai_processes()?;
+                // Try parsing as numeric ID first
                 if let Ok(id) = id_str.parse::<usize>() {
-                    let sessions = scan_ai_processes()?;
                     if let Some(session) = sessions.get(id.saturating_sub(1)) {
                         jump_to_session(session)?;
                     } else {
@@ -1260,11 +1256,37 @@ fn main() -> Result<()> {
                         println!("Use 'rpai scan' to see available sessions");
                     }
                 } else {
-                    println!("Invalid ID: {}", id_str);
-                    println!("ID must be a number");
+                    // Try matching by session name
+                    let matching: Vec<_> = sessions
+                        .iter()
+                        .filter(|s| {
+                            s.session_name
+                                .as_ref()
+                                .map(|n| n == id_str || n.contains(id_str))
+                                .unwrap_or(false)
+                        })
+                        .collect();
+
+                    match matching.len() {
+                        0 => {
+                            println!("No session found matching: {}", id_str);
+                            println!("Use 'rpai scan' to see available sessions");
+                        }
+                        1 => {
+                            jump_to_session(matching[0])?;
+                        }
+                        _ => {
+                            println!("Multiple sessions match '{}'. Be more specific:", id_str);
+                            for s in matching {
+                                if let Some(name) = &s.session_name {
+                                    println!("  - {}", name);
+                                }
+                            }
+                        }
+                    }
                 }
             } else {
-                println!("Usage: rpai jump <id>");
+                println!("Usage: rpai jump <id|name>");
                 println!("Use 'rpai scan' to see available sessions");
             }
         }
@@ -1302,7 +1324,7 @@ fn main() -> Result<()> {
             println!("Usage:");
             println!("  rpai                - Interactive TUI (default)");
             println!("  rpai scan           - Scan and display AI agent sessions");
-            println!("  rpai jump <id>      - Jump to session by ID");
+            println!("  rpai jump <id|name> - Jump to session by ID or name");
             println!("  rpai kill <id>      - Terminate a session");
             println!("  rpai theme [name]   - Show/set theme");
             println!("  rpai help           - Show this help message");
