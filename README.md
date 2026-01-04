@@ -28,7 +28,8 @@ cd rpai
 cargo install --path .
 ```
 
-This installs `rpai` to `~/.cargo/bin/rpai`.
+This builds and installs `rpai` to `~/.cargo/bin/rpai` automatically.
+Cargo handles the build and installation - you don't need to copy files manually.
 
 ### Option 3: Quick build script
 
