@@ -297,10 +297,52 @@ fn get_cpu_percentage(pid: u32) -> Option<f64> {
     }
 }
 
+fn get_descendant_pids(pid: u32, ps_output: &str) -> Vec<u32> {
+    // Parse ps output to build parent->children map
+    let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
+    for line in ps_output.lines() {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() >= 2 {
+            if let (Ok(child_pid), Ok(parent_pid)) =
+                (parts[0].parse::<u32>(), parts[1].parse::<u32>())
+            {
+                children.entry(parent_pid).or_default().push(child_pid);
+            }
+        }
+    }
+
+    // BFS to collect all descendants
+    let mut result = vec![pid];
+    let mut queue = vec![pid];
+    while let Some(current) = queue.pop() {
+        if let Some(kids) = children.get(&current) {
+            for &kid in kids {
+                result.push(kid);
+                queue.push(kid);
+            }
+        }
+    }
+    result
+}
+
 fn get_pane_cpu_usage(pane_pid: u32) -> Option<f64> {
-    // Get total CPU usage of all processes in the pane's process tree
+    // Get all processes with their parent PIDs
+    let ps_output = Command::new("ps")
+        .args(["-axo", "pid,ppid"])
+        .output()
+        .ok()?;
+
+    if !ps_output.status.success() {
+        return None;
+    }
+
+    let ps_str = String::from_utf8_lossy(&ps_output.stdout);
+    let descendant_pids = get_descendant_pids(pane_pid, &ps_str);
+
+    // Get CPU usage for all descendant PIDs
+    let pid_args: Vec<String> = descendant_pids.iter().map(|p| p.to_string()).collect();
     let output = Command::new("ps")
-        .args(["-g", &pane_pid.to_string(), "-o", "pcpu="])
+        .args(["-p", &pid_args.join(","), "-o", "pcpu="])
         .output()
         .ok()?;
 
