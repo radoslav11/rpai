@@ -14,6 +14,8 @@ struct AiSession {
     working_dir: String,
     name: Option<String>,
     pane_id: Option<String>,
+    session_name: Option<String>,
+    window_index: Option<u32>,
     status: SessionStatus,
     uptime_seconds: i64,
     cpu_usage: f32,
@@ -82,6 +84,47 @@ fn get_cwd_via_lsof(pid: u32) -> Option<String> {
     None
 }
 
+#[derive(Debug, Clone)]
+struct TmuxPaneInfo {
+    pane_id: String,
+    session_name: String,
+    window_index: u32,
+}
+
+fn get_tmux_pane_info() -> Result<HashMap<u32, TmuxPaneInfo>> {
+    let output = Command::new("tmux")
+        .args([
+            "list-panes",
+            "-a",
+            "-F",
+            "#{pane_pid}\t#{pane_id}\t#{session_name}\t#{window_index}",
+        ])
+        .output()
+        .context("Failed to execute tmux command")?;
+
+    let mut pane_map: HashMap<u32, TmuxPaneInfo> = HashMap::new();
+
+    if output.status.success() {
+        for line in String::from_utf8_lossy(&output.stdout).lines() {
+            let parts: Vec<&str> = line.split('\t').collect();
+            if parts.len() >= 4 {
+                let pid: u32 = parts.get(0).and_then(|s| s.parse().ok()).unwrap_or(0);
+
+                if pid > 0 {
+                    let pane_info = TmuxPaneInfo {
+                        pane_id: parts.get(1).unwrap_or(&"").to_string(),
+                        session_name: parts.get(2).unwrap_or(&"").to_string(),
+                        window_index: parts.get(3).and_then(|s| s.parse().ok()).unwrap_or(0),
+                    };
+                    pane_map.insert(pid, pane_info);
+                }
+            }
+        }
+    }
+
+    Ok(pane_map)
+}
+
 fn scan_ai_processes() -> Result<Vec<AiSession>> {
     let mut system = System::new_all();
     system.refresh_processes_specifics(
@@ -92,6 +135,8 @@ fn scan_ai_processes() -> Result<Vec<AiSession>> {
 
     let ps_processes = get_process_info_via_ps()?;
     let ps_map: HashMap<u32, ProcessInfo> = ps_processes.into_iter().map(|p| (p.pid, p)).collect();
+
+    let tmux_panes = get_tmux_pane_info().unwrap_or_default();
 
     let agent_pattern = Regex::new(r"(?i)(opencode|claude|codex|cursor)")?;
     let mut sessions = Vec::new();
@@ -190,12 +235,26 @@ fn scan_ai_processes() -> Result<Vec<AiSession>> {
 
         let status = AiSession::determine_status(uptime, cpu_usage);
 
+        let tmux_info = tmux_panes.get(&pid.as_u32());
+
+        let (pane_id, session_name, window_index) = if let Some(info) = tmux_info {
+            (
+                Some(info.pane_id.clone()),
+                Some(info.session_name.clone()),
+                Some(info.window_index),
+            )
+        } else {
+            (None, None, None)
+        };
+
         sessions.push(AiSession {
             pid: pid.as_u32(),
             agent_type,
             working_dir,
             name: None,
-            pane_id: None,
+            pane_id,
+            session_name,
+            window_index,
             status,
             uptime_seconds: uptime.num_seconds(),
             cpu_usage,
@@ -254,6 +313,18 @@ fn display_sessions(sessions: &[AiSession]) {
             "    PID: {} | Mem: {}MB | CPU: {:.1}%",
             session.pid, session.memory_mb, session.cpu_usage
         );
+
+        // Display tmux info if available
+        if let (Some(session_name), Some(window_index), Some(pane_id)) = (
+            &session.session_name,
+            &session.window_index,
+            &session.pane_id,
+        ) {
+            println!(
+                "    Session: {} | Window: {} | Pane: {}",
+                session_name, window_index, pane_id
+            );
+        }
 
         let cwd = if session.working_dir.len() > 60 {
             format!(
@@ -349,12 +420,14 @@ fn main() -> Result<()> {
             println!("rpai - Tmux plugin for AI agent session management");
             println!();
             println!("Usage:");
-            println!("  rpai scan          - Scan and display AI agent sessions");
+            println!("  rpai [scan]        - Scan and display AI agent sessions");
             println!("  rpai kill <id>     - Terminate a session");
             println!("  rpai help           - Show this help message");
         }
         _ => {
-            println!("Use 'rpai help' for usage information");
+            // Default to scan mode
+            let sessions = scan_ai_processes()?;
+            display_sessions(&sessions);
         }
     }
 
