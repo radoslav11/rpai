@@ -209,6 +209,41 @@ fn load_theme() -> ThemeName {
 }
 
 // ============================================================================
+// APP CONFIG
+// ============================================================================
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AppConfig {
+    /// CPU percentage threshold below which a process is considered idle (default: 5.0)
+    #[serde(default = "default_idle_threshold")]
+    idle_threshold: f64,
+}
+
+fn default_idle_threshold() -> f64 {
+    5.0
+}
+
+impl Default for AppConfig {
+    fn default() -> Self {
+        Self {
+            idle_threshold: default_idle_threshold(),
+        }
+    }
+}
+
+fn load_config() -> AppConfig {
+    let path = config_dir().join("config.json");
+    if path.exists() {
+        if let Ok(content) = fs::read_to_string(&path) {
+            if let Ok(config) = serde_json::from_str::<AppConfig>(&content) {
+                return config;
+            }
+        }
+    }
+    AppConfig::default()
+}
+
+// ============================================================================
 // SESSION DATA
 // ============================================================================
 
@@ -358,7 +393,7 @@ fn get_pane_cpu_usage(pane_pid: u32) -> Option<f64> {
     }
 }
 
-fn get_session_state(pid: u32, pane_pid: Option<u32>) -> SessionState {
+fn get_session_state(pid: u32, pane_pid: Option<u32>, idle_threshold: f64) -> SessionState {
     // If we have a pane PID, check the entire pane's process group CPU usage
     let cpu_pct = if let Some(pane_pid) = pane_pid {
         get_pane_cpu_usage(pane_pid)
@@ -367,7 +402,7 @@ fn get_session_state(pid: u32, pane_pid: Option<u32>) -> SessionState {
     };
 
     if let Some(cpu) = cpu_pct {
-        if cpu > 1.0 {
+        if cpu > idle_threshold {
             SessionState::Running
         } else {
             SessionState::Waiting
@@ -471,6 +506,7 @@ fn find_tmux_pane_for_pid(
 }
 
 fn scan_ai_processes() -> Result<Vec<AiSession>> {
+    let config = load_config();
     let tmux_panes = get_tmux_pane_info().unwrap_or_default();
 
     let ps_processes = get_process_info_via_ps()?;
@@ -594,7 +630,7 @@ fn scan_ai_processes() -> Result<Vec<AiSession>> {
                 pane_height,
                 uptime_seconds: uptime.as_secs() as i64,
                 memory_mb,
-                state: get_session_state(pid, pane_pid),
+                state: get_session_state(pid, pane_pid, config.idle_threshold),
             });
         }
     }

@@ -92,10 +92,24 @@ rpai help           # Show help
 
 Theme is persisted to `~/.config/rpai/theme`
 
-## Config Directory
+## Configuration
 
-`~/.config/rpai/`
+Config directory: `~/.config/rpai/`
+
+**Files:**
 - `theme` - Current theme name
+- `config.json` - Application settings
+
+**Example `config.json`:**
+
+```json
+{
+  "idle_threshold": 5.0
+}
+```
+
+**Options:**
+- `idle_threshold` - CPU percentage threshold below which a process is considered idle/waiting (default: `5.0`). Processes above this threshold show as running (▶), below as waiting (⏸).
 
 ## License
 
