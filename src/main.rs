@@ -1200,27 +1200,29 @@ fn jump_to_session(session: &AiSession) -> Result<()> {
         // Check if we're inside a tmux session
         let in_tmux = std::env::var("TMUX").is_ok();
 
-        let output = if in_tmux {
+        if in_tmux {
             // Use switch-client when inside tmux
-            Command::new("tmux")
+            let output = Command::new("tmux")
                 .args(["switch-client", "-t", &pane_target])
                 .output()
-                .map_err(|e| format!("Failed to execute tmux switch-client command: {}", e))?
-        } else {
-            // Use attach-session when outside tmux
-            Command::new("tmux")
-                .args(["attach-session", "-t", &pane_target])
-                .output()
-                .map_err(|e| format!("Failed to execute tmux attach-session command: {}", e))?
-        };
+                .map_err(|e| format!("Failed to execute tmux switch-client command: {}", e))?;
 
-        if output.status.success() {
-            println!(
-                "Switched to session: {} (Window: {}, Pane: {})",
-                session_name, window_index, pane_id
-            );
+            if output.status.success() {
+                println!(
+                    "Switched to session: {} (Window: {}, Pane: {})",
+                    session_name, window_index, pane_id
+                );
+            } else {
+                println!("Failed to switch to session");
+            }
         } else {
-            println!("Failed to switch to session");
+            // Use attach-session when outside tmux - must exec to take over terminal
+            use std::os::unix::process::CommandExt;
+            let err = Command::new("tmux")
+                .args(["attach-session", "-t", &pane_target])
+                .exec();
+            // exec only returns on error
+            println!("Failed to attach to session: {}", err);
         }
     } else {
         println!("No tmux session info available for this process");
