@@ -1184,8 +1184,8 @@ fn run_tui(sessions: Vec<AiSession>) -> Result<Option<AiSession>> {
     loop {
         terminal.draw(|frame| ui(frame, &mut app))?;
 
-        // Check for events with 1-second timeout
-        if event::poll(Duration::from_millis(500))? {
+        // Check for events with 300ms timeout
+        if event::poll(Duration::from_millis(300))? {
             match event::read()? {
                 Event::Key(key) => {
                     if key.kind == KeyEventKind::Press {

@@ -99,13 +99,15 @@ Config file: `~/.config/rpai/config.json`
 ```json
 {
   "theme": "gruvbox",
-  "idle_threshold": 3.0
+  "idle_threshold": 3.0,
+  "prompt_idle_threshold": 5.0
 }
 ```
 
 **Options:**
 - `theme` - Color theme (default: `"gruvbox"`). Options: gruvbox, nord, catppuccin, dracula, tokyo, solarized.
-- `idle_threshold` - CPU percentage threshold below which a process is considered idle/waiting (default: `3.0`). Processes above this threshold show as running (▶), below as waiting (⏸).
+- `idle_threshold` - CPU percentage threshold below which a process is considered idle/waiting (default: `3.0`). Processes below this are always shown as waiting (⏸).
+- `prompt_idle_threshold` - Upper CPU threshold for prompt-based detection (default: `5.0`). If CPU is between `idle_threshold` and this value, rpai checks the terminal for input prompts (like `>`, `(Y/n)`) to determine if the agent is waiting for input.
 
 ## License
 
