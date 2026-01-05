@@ -201,6 +201,10 @@ struct AppConfig {
     /// CPU percentage threshold below which a process is considered idle (default: 3.0)
     #[serde(default = "default_idle_threshold")]
     idle_threshold: f64,
+    /// CPU threshold for prompt-based idle detection (default: 5.0)
+    /// If CPU is below this AND a prompt pattern is detected, consider idle
+    #[serde(default = "default_prompt_idle_threshold")]
+    prompt_idle_threshold: f64,
 }
 
 fn default_theme() -> String {
@@ -211,11 +215,16 @@ fn default_idle_threshold() -> f64 {
     3.0
 }
 
+fn default_prompt_idle_threshold() -> f64 {
+    5.0
+}
+
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
             theme: default_theme(),
             idle_threshold: default_idle_threshold(),
+            prompt_idle_threshold: default_prompt_idle_threshold(),
         }
     }
 }
@@ -226,18 +235,6 @@ fn load_config() -> AppConfig {
         if let Ok(content) = fs::read_to_string(&path) {
             if let Ok(config) = serde_json::from_str::<AppConfig>(&content) {
                 return config;
-            }
-        }
-    }
-    // Migration: check for legacy theme file
-    let legacy_theme_path = config_dir().join("theme");
-    if legacy_theme_path.exists() {
-        if let Ok(content) = fs::read_to_string(&legacy_theme_path) {
-            if let Some(theme) = ThemeName::from_str(content.trim()) {
-                return AppConfig {
-                    theme: theme.name().to_string(),
-                    ..Default::default()
-                };
             }
         }
     }
@@ -295,6 +292,7 @@ struct AiSession {
     pane_height: Option<u32>,
     uptime_seconds: i64,
     memory_mb: u64,
+    cpu_percent: f64,
     state: SessionState,
 }
 
@@ -398,19 +396,91 @@ fn get_process_tree_cpu_usage(pid: u32) -> Option<f64> {
     }
 }
 
-fn get_session_state(pid: u32, idle_threshold: f64) -> SessionState {
-    // Check CPU usage of the AI agent process and all its descendants
-    let cpu_pct = get_process_tree_cpu_usage(pid);
+/// Get the last few lines of a tmux pane's content
+fn get_tmux_pane_content(pane_id: &str) -> Option<String> {
+    let output = Command::new("tmux")
+        .args(["capture-pane", "-p", "-t", pane_id, "-S", "-5"]) // Last 5 lines
+        .output()
+        .ok()?;
 
-    if let Some(cpu) = cpu_pct {
-        if cpu > idle_threshold {
-            SessionState::Running
-        } else {
-            SessionState::Waiting
-        }
+    if output.status.success() {
+        Some(String::from_utf8_lossy(&output.stdout).to_string())
     } else {
-        SessionState::Waiting
+        None
     }
+}
+
+/// Check if the pane content shows a prompt waiting for input
+fn has_input_prompt(content: &str) -> bool {
+    let lines: Vec<&str> = content.lines().filter(|l| !l.trim().is_empty()).collect();
+    let last_line = lines.last().map(|s| s.trim()).unwrap_or("");
+
+    // Check for common prompt patterns
+    let prompt_patterns = [
+        // Simple input prompts
+        "> ",
+        "❯ ",
+        ">>> ",
+        // Yes/No prompts
+        "(Y/n)",
+        "(y/N)",
+        "[Y/n]",
+        "[y/N]",
+        "(yes/no)",
+        "[yes/no]",
+        "? (y/n)",
+        // Permission prompts
+        "Yes, allow",
+        "No, and tell",
+        "Do you want to",
+        "Continue?",
+        "Proceed?",
+        // Claude/OpenCode specific
+        "What would you like",
+        "How can I help",
+    ];
+
+    for pattern in prompt_patterns {
+        if last_line.contains(pattern) || content.contains(pattern) {
+            return true;
+        }
+    }
+
+    // Check if last line ends with common prompt characters
+    if last_line.ends_with("> ") || last_line.ends_with("? ") || last_line == ">" {
+        return true;
+    }
+
+    false
+}
+
+fn get_session_state_and_cpu(
+    pid: u32,
+    pane_id: Option<&str>,
+    idle_threshold: f64,
+    prompt_idle_threshold: f64,
+) -> (SessionState, f64) {
+    // Check CPU usage of the AI agent process and all its descendants
+    let cpu_pct = get_process_tree_cpu_usage(pid).unwrap_or(0.0);
+
+    // If CPU is clearly above idle threshold, it's running
+    if cpu_pct > idle_threshold {
+        // But also check if it might be waiting for input with moderate CPU
+        // (some agents have background processes that use a bit of CPU)
+        if cpu_pct <= prompt_idle_threshold {
+            if let Some(pane_id) = pane_id {
+                if let Some(content) = get_tmux_pane_content(pane_id) {
+                    if has_input_prompt(&content) {
+                        return (SessionState::Waiting, cpu_pct);
+                    }
+                }
+            }
+        }
+        return (SessionState::Running, cpu_pct);
+    }
+
+    // CPU is below idle threshold - definitely waiting
+    (SessionState::Waiting, cpu_pct)
 }
 
 fn get_cwd_via_lsof(pid: u32) -> Option<String> {
@@ -618,6 +688,13 @@ fn scan_ai_processes() -> Result<Vec<AiSession>> {
                     (None, None, None, None, None)
                 };
 
+            let (state, cpu_percent) = get_session_state_and_cpu(
+                pid,
+                pane_id.as_deref(),
+                config.idle_threshold,
+                config.prompt_idle_threshold,
+            );
+
             sessions.push(AiSession {
                 pid,
                 agent_type: agent_type.to_string(),
@@ -630,7 +707,8 @@ fn scan_ai_processes() -> Result<Vec<AiSession>> {
                 pane_height,
                 uptime_seconds: uptime.as_secs() as i64,
                 memory_mb,
-                state: get_session_state(pid, config.idle_threshold),
+                cpu_percent,
+                state,
             });
         }
     }
@@ -691,45 +769,40 @@ fn format_path_visual(path: &str, max_len: usize, theme: &Theme) -> Vec<Span<'st
         // Show first part, ..., last two parts
         spans.push(Span::styled(
             format!(" {}", parts[0]),
-            Style::default().fg(theme.dim),
+            Style::default().fg(theme.fg),
         ));
-        spans.push(Span::styled(
-            " / ... / ",
-            Style::default().fg(theme.dim).add_modifier(Modifier::DIM),
-        ));
+        spans.push(Span::styled(" / ... / ", Style::default().fg(theme.dim)));
 
         let last_idx = parts.len() - 1;
         if parts.len() > 2 {
             spans.push(Span::styled(
                 parts[last_idx - 1].to_string(),
-                Style::default().fg(theme.dim),
+                Style::default().fg(theme.fg),
             ));
-            spans.push(Span::styled(
-                " / ",
-                Style::default().fg(theme.dim).add_modifier(Modifier::DIM),
-            ));
+            spans.push(Span::styled(" / ", Style::default().fg(theme.dim)));
         }
         spans.push(Span::styled(
             parts[last_idx].to_string(),
-            Style::default().fg(theme.fg),
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
         ));
     } else {
         // Show full path with styled separators
         for (i, part) in parts.iter().enumerate() {
             if i > 0 {
-                spans.push(Span::styled(
-                    " / ",
-                    Style::default().fg(theme.dim).add_modifier(Modifier::DIM),
-                ));
+                spans.push(Span::styled(" / ", Style::default().fg(theme.dim)));
             } else {
                 spans.push(Span::styled(" ", Style::default()));
             }
 
-            // Last part is brighter
+            // Last part is brighter/accented
             let style = if i == parts.len() - 1 {
-                Style::default().fg(theme.fg)
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(theme.dim)
+                Style::default().fg(theme.fg)
             };
             spans.push(Span::styled(part.to_string(), style));
         }
@@ -1021,7 +1094,7 @@ fn create_session_list_item(
     let state_color = if session.state == SessionState::Running {
         theme.green
     } else {
-        theme.dim
+        theme.orange
     };
     let line1 = Line::from(vec![
         Span::styled(prefix, prefix_style),
@@ -1047,9 +1120,13 @@ fn create_session_list_item(
             Style::default().fg(theme.fg),
         ),
         Span::styled(" | ", Style::default().fg(theme.dim)),
-        Span::styled(" ", Style::default().fg(theme.dim)),
         Span::styled(
-            format!("{}MB", session.memory_mb),
+            format!("CPU: {:.1}%", session.cpu_percent),
+            Style::default().fg(state_color),
+        ),
+        Span::styled(" | ", Style::default().fg(theme.dim)),
+        Span::styled(
+            format!("MEM: {}MB", session.memory_mb),
             Style::default().fg(theme.fg),
         ),
     ]);
@@ -1108,7 +1185,7 @@ fn run_tui(sessions: Vec<AiSession>) -> Result<Option<AiSession>> {
         terminal.draw(|frame| ui(frame, &mut app))?;
 
         // Check for events with 1-second timeout
-        if event::poll(Duration::from_millis(1000))? {
+        if event::poll(Duration::from_millis(500))? {
             match event::read()? {
                 Event::Key(key) => {
                     if key.kind == KeyEventKind::Press {
@@ -1278,12 +1355,13 @@ fn display_sessions(sessions: &[AiSession]) {
 
     for (i, session) in sessions.iter().enumerate() {
         println!(
-            "[{}] {} {} | {} | PID: {} | {}MB",
+            "[{}] {} {} | {} | PID: {} | CPU: {:.1}% | MEM: {}MB",
             i + 1,
             session.agent_type,
             session.state.symbol(),
             format_duration(session.uptime_seconds),
             session.pid,
+            session.cpu_percent,
             session.memory_mb
         );
 
