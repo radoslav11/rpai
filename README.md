@@ -105,7 +105,7 @@ Config file: `~/.config/rpai/config.json`
 }
 ```
 
-To use ASCII symbols instead of Unicode:
+To use ASCII symbols instead of Unicode (e.g., for terminals with poor Unicode support), set `"ascii_symbols": true`:
 
 ```json
 {
