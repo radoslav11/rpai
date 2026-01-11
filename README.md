@@ -4,7 +4,7 @@
   <img src="assets/redpanda.png" width="150" alt="rpai logo">
 </div>
 
-A tool for managing multiple AI coding agent sessions (opencode, claude, codex, cursor) in tmux.
+A tool for managing multiple AI coding agent sessions (opencode, claude, codex, cursor, gemini) in tmux.
 
 <div align="center">
   <img src="assets/screenshot.png" alt="rpai screenshot">
@@ -100,7 +100,6 @@ Config file: `~/.config/rpai/config.json`
 {
   "theme": "gruvbox",
   "idle_threshold": 3.0,
-  "prompt_idle_threshold": 5.0,
   "refresh_ms": 50
 }
 ```
@@ -111,7 +110,6 @@ To use ASCII symbols instead of Unicode (e.g., for terminals with poor Unicode s
 {
   "theme": "gruvbox",
   "idle_threshold": 3.0,
-  "prompt_idle_threshold": 5.0,
   "refresh_ms": 50,
   "ascii_symbols": true
 }
@@ -119,8 +117,7 @@ To use ASCII symbols instead of Unicode (e.g., for terminals with poor Unicode s
 
 **Options:**
 - `theme` - Color theme (default: `"gruvbox"`). Options: gruvbox, nord, catppuccin, dracula, tokyo, solarized.
-- `idle_threshold` - CPU percentage threshold below which a process is considered idle/waiting (default: `3.0`). Processes below this are always shown as waiting (⏸ or ||).
-- `prompt_idle_threshold` - Upper CPU threshold for prompt-based detection (default: `5.0`). If CPU is between `idle_threshold` and this value, rpai checks for input prompts (like `>`, `(Y/n)`) to determine if the agent is waiting for input.
+- `idle_threshold` - CPU percentage threshold below which a process is considered idle/waiting (default: `3.0`). LSP servers (pyright, clangd, etc.) are automatically excluded from CPU calculation to avoid false positives from background indexing.
 - `refresh_ms` - Refresh interval in milliseconds (default: `50`). Lower values give smoother updates but use slightly more CPU.
 - `ascii_symbols` - Use ASCII symbols instead of Unicode (default: `false`). When `true`, shows `>>` for running and `||` for waiting instead of `▶` and `⏸`.
 

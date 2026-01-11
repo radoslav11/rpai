@@ -201,10 +201,6 @@ struct AppConfig {
     /// CPU percentage threshold below which a process is considered idle (default: 3.0)
     #[serde(default = "default_idle_threshold")]
     idle_threshold: f64,
-    /// CPU threshold for prompt-based idle detection (default: 5.0)
-    /// If CPU is below this AND a prompt pattern is detected, consider idle
-    #[serde(default = "default_prompt_idle_threshold")]
-    prompt_idle_threshold: f64,
     /// Refresh interval in milliseconds (default: 50)
     #[serde(default = "default_refresh_ms")]
     refresh_ms: u64,
@@ -221,10 +217,6 @@ fn default_idle_threshold() -> f64 {
     3.0
 }
 
-fn default_prompt_idle_threshold() -> f64 {
-    5.0
-}
-
 fn default_refresh_ms() -> u64 {
     50
 }
@@ -238,7 +230,6 @@ impl Default for AppConfig {
         Self {
             theme: default_theme(),
             idle_threshold: default_idle_threshold(),
-            prompt_idle_threshold: default_prompt_idle_threshold(),
             refresh_ms: default_refresh_ms(),
             ascii_symbols: default_ascii_symbols(),
         }
@@ -391,6 +382,31 @@ fn get_descendant_pids(pid: u32, ps_output: &str) -> Vec<u32> {
     result
 }
 
+/// LSP server patterns to exclude from CPU calculation.
+/// These run in the background and don't indicate the AI agent is actively working.
+const LSP_PATTERNS: &[&str] = &[
+    "pyright-langserver",
+    "pylsp",
+    "python-lsp-server",
+    "clangd",
+    "typescript-language-server",
+    "tsserver",
+    "gopls",
+    "rust-analyzer",
+    "lua-language-server",
+    "bash-language-server",
+    "vscode-json-language",
+    "yaml-language-server",
+    "tailwindcss-language-server",
+];
+
+fn is_lsp_process(command: &str) -> bool {
+    let cmd_lower = command.to_lowercase();
+    LSP_PATTERNS
+        .iter()
+        .any(|pattern| cmd_lower.contains(pattern))
+}
+
 fn get_process_tree_cpu_usage(pid: u32) -> Option<f64> {
     // Get all processes with their parent PIDs
     let ps_output = Command::new("ps")
@@ -405,10 +421,10 @@ fn get_process_tree_cpu_usage(pid: u32) -> Option<f64> {
     let ps_str = String::from_utf8_lossy(&ps_output.stdout);
     let descendant_pids = get_descendant_pids(pid, &ps_str);
 
-    // Get CPU usage for all descendant PIDs (includes the pid itself)
+    // Get CPU usage and command for all descendant PIDs, filtering out LSP servers
     let pid_args: Vec<String> = descendant_pids.iter().map(|p| p.to_string()).collect();
     let output = Command::new("ps")
-        .args(["-p", &pid_args.join(","), "-o", "pcpu="])
+        .args(["-p", &pid_args.join(","), "-o", "pcpu=,command="])
         .output()
         .ok()?;
 
@@ -416,7 +432,20 @@ fn get_process_tree_cpu_usage(pid: u32) -> Option<f64> {
         let stdout = String::from_utf8_lossy(&output.stdout);
         let total: f64 = stdout
             .lines()
-            .filter_map(|line| line.trim().parse::<f64>().ok())
+            .filter_map(|line| {
+                let line = line.trim();
+                // Parse "CPU COMMAND" format - CPU is first space-separated field
+                let mut parts = line.splitn(2, char::is_whitespace);
+                let cpu_str = parts.next()?.trim();
+                let command = parts.next().unwrap_or("");
+
+                // Skip LSP processes
+                if is_lsp_process(command) {
+                    return None;
+                }
+
+                cpu_str.parse::<f64>().ok()
+            })
             .sum();
         Some(total)
     } else {
@@ -424,91 +453,17 @@ fn get_process_tree_cpu_usage(pid: u32) -> Option<f64> {
     }
 }
 
-/// Get the last few lines of a tmux pane's content
-fn get_tmux_pane_content(pane_id: &str) -> Option<String> {
-    let output = Command::new("tmux")
-        .args(["capture-pane", "-p", "-t", pane_id, "-S", "-5"]) // Last 5 lines
-        .output()
-        .ok()?;
-
-    if output.status.success() {
-        Some(String::from_utf8_lossy(&output.stdout).to_string())
-    } else {
-        None
-    }
-}
-
-/// Check if the pane content shows a prompt waiting for input
-fn has_input_prompt(content: &str) -> bool {
-    let lines: Vec<&str> = content.lines().filter(|l| !l.trim().is_empty()).collect();
-    let last_line = lines.last().map(|s| s.trim()).unwrap_or("");
-
-    // Check for common prompt patterns
-    let prompt_patterns = [
-        // Simple input prompts
-        "> ",
-        "❯ ",
-        ">>> ",
-        // Yes/No prompts
-        "(Y/n)",
-        "(y/N)",
-        "[Y/n]",
-        "[y/N]",
-        "(yes/no)",
-        "[yes/no]",
-        "? (y/n)",
-        // Permission prompts
-        "Yes, allow",
-        "No, and tell",
-        "Do you want to",
-        "Continue?",
-        "Proceed?",
-        // Claude/OpenCode specific
-        "What would you like",
-        "How can I help",
-    ];
-
-    for pattern in prompt_patterns {
-        if last_line.contains(pattern) || content.contains(pattern) {
-            return true;
-        }
-    }
-
-    // Check if last line ends with common prompt characters
-    if last_line.ends_with("> ") || last_line.ends_with("? ") || last_line == ">" {
-        return true;
-    }
-
-    false
-}
-
-fn get_session_state_and_cpu(
-    pid: u32,
-    pane_id: Option<&str>,
-    idle_threshold: f64,
-    prompt_idle_threshold: f64,
-) -> (SessionState, f64) {
+fn get_session_state_and_cpu(pid: u32, idle_threshold: f64) -> (SessionState, f64) {
     // Check CPU usage of the AI agent process and all its descendants
+    // (LSP servers are filtered out in get_process_tree_cpu_usage)
     let cpu_pct = get_process_tree_cpu_usage(pid).unwrap_or(0.0);
 
-    // If CPU is clearly above idle threshold, it's running
+    // Use CPU as the primary signal for determining state
     if cpu_pct > idle_threshold {
-        // But also check if it might be waiting for input with moderate CPU
-        // (some agents have background processes that use a bit of CPU)
-        if cpu_pct <= prompt_idle_threshold {
-            if let Some(pane_id) = pane_id {
-                if let Some(content) = get_tmux_pane_content(pane_id) {
-                    if has_input_prompt(&content) {
-                        return (SessionState::Waiting, cpu_pct);
-                    }
-                }
-            }
-        }
-        return (SessionState::Running, cpu_pct);
+        (SessionState::Running, cpu_pct)
+    } else {
+        (SessionState::Waiting, cpu_pct)
     }
-
-    // CPU is below idle threshold - definitely waiting
-    (SessionState::Waiting, cpu_pct)
 }
 
 fn get_cwd_via_lsof(pid: u32) -> Option<String> {
@@ -615,7 +570,7 @@ fn scan_ai_processes() -> Result<Vec<AiSession>> {
         .map(|p| (p.pid, p))
         .collect();
 
-    let agent_pattern = Regex::new(r"(?i)(opencode|claude|codex|cursor)")?;
+    let agent_pattern = Regex::new(r"(?i)(opencode|claude|codex|cursor|gemini)")?;
 
     // First pass: find all matching PIDs from ps (fast)
     let mut matched_pids: Vec<(u32, ProcessInfo)> = Vec::new();
@@ -679,6 +634,8 @@ fn scan_ai_processes() -> Result<Vec<AiSession>> {
             "codex"
         } else if cmd_lower.contains("cursor") {
             "cursor"
+        } else if cmd_lower.contains("gemini") {
+            "gemini"
         } else if comm_lower.contains("opencode") {
             "opencode"
         } else if comm_lower.contains("claude") {
@@ -687,6 +644,8 @@ fn scan_ai_processes() -> Result<Vec<AiSession>> {
             "codex"
         } else if comm_lower.contains("cursor") {
             "cursor"
+        } else if comm_lower.contains("gemini") {
+            "gemini"
         } else {
             "unknown"
         };
@@ -716,12 +675,7 @@ fn scan_ai_processes() -> Result<Vec<AiSession>> {
                     (None, None, None, None, None)
                 };
 
-            let (state, cpu_percent) = get_session_state_and_cpu(
-                pid,
-                pane_id.as_deref(),
-                config.idle_threshold,
-                config.prompt_idle_threshold,
-            );
+            let (state, cpu_percent) = get_session_state_and_cpu(pid, config.idle_threshold);
 
             sessions.push(AiSession {
                 pid,
